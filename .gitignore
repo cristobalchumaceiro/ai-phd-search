@@ -17,3 +17,6 @@ generate_report.py
 
 # Tests
 test_phd_tracker.py
+
+# Ephemeral tasks, benchmarks, and scraper cache
+tasks/

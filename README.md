@@ -5,9 +5,8 @@ An automated pipeline that scrapes academic job boards (FindAPhD, jobs.ac.uk), b
 ## How It Works
 
 1. **The Python Engine (`phd_tracker.py`)**: A Playwright script that mimics human behavior to bypass Cloudflare, scraping job descriptions and safely updating your local `jobs_database.json`.
-2. **The AI Brain (`.agents/skills/phd-tracker/SKILL.md`)**: A set of rules that teaches your AI assistant how to operate the tracker. It has two modes:
-   * **Discovery Mode**: Scrapes new jobs, evaluates them against your profile, and spawns subagents to research the lead supervisors.
-   * **ATS Mode**: A Kanban-style tracker where you can ask the AI to update a job's status, add a timeline note, or view your shortlisted pipeline.
+2. **The PhD Tracker & ATS (`.agents/skills/phd-tracker/SKILL.md`)**: The primary AI skill managing daily scraping, profile evaluation, supervisor research, and ATS pipeline tracking.
+3. **The Portal Scraper (`.agents/skills/portal-scraper/SKILL.md`)**: A specialised skill that can autonomously inspect any arbitrary university, DLA, or CDT portal URL, micro-test extraction, and import all opportunities directly into the tracker.
 
 ---
 
@@ -44,6 +43,11 @@ To find and evaluate new jobs, try saying:
 * *"Any new positions today?"*
 * *"Run the PhD tracker."*
 * *"Scrape for new jobs."*
+
+### Custom Portal Scraping
+If you have a link to a specific Doctoral Landscape Award (DLA), CDT, or university project portal:
+* *"Scrape and import projects from `https://www.trees-dla.ac.uk/projects`."*
+* *"Extract all PhD positions from this portal URL and evaluate them against my profile."*
 
 ### ATS Mode
 To manage jobs you've already discovered, try saying:

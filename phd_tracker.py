@@ -234,6 +234,49 @@ def command_update(job_id, status, note):
     save_db(db)
     print(f"Successfully updated job '{job_id}'.", file=sys.stderr)
 
+def command_ingest(file_path):
+    if not os.path.exists(file_path):
+        print(f"Error: Ingest file '{file_path}' not found.", file=sys.stderr)
+        sys.exit(1)
+        
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+    except Exception as e:
+        print(f"Error reading ingest file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if isinstance(raw_data, list):
+        jobs_dict = {}
+        for item in raw_data:
+            job_id = item.get("id") or item.get("url", "")
+            if job_id:
+                jobs_dict[job_id] = item
+    elif isinstance(raw_data, dict):
+        jobs_dict = raw_data
+    else:
+        print("Error: Ingest data must be a JSON object or array of objects.", file=sys.stderr)
+        sys.exit(1)
+
+    db = load_db()
+    added_count = 0
+    for job_id, job in jobs_dict.items():
+        if job_id not in db:
+            db[job_id] = {
+                "title": job.get("title", ""),
+                "url": job.get("url", ""),
+                "status": "unreviewed",
+                "description": job.get("description", "")
+            }
+            if "supervisors" in job:
+                db[job_id]["supervisors"] = job["supervisors"]
+            if "institutions" in job:
+                db[job_id]["institutions"] = job["institutions"]
+            added_count += 1
+
+    save_db(db)
+    print(f"Ingested {added_count} new jobs into database (total database size: {len(db)}).", file=sys.stderr)
+
 def main():
     parser = argparse.ArgumentParser(description="PhD Tracker CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -252,6 +295,9 @@ def main():
     update_cmd.add_argument("--status", help="New status for the job")
     update_cmd.add_argument("--note", help="Note to append to the job's timeline")
     
+    ingest_cmd = subparsers.add_parser("ingest", help="Ingest external or portal jobs into database as unreviewed")
+    ingest_cmd.add_argument("jobs_file", help="JSON file containing jobs to ingest")
+
     args = parser.parse_args()
     
     if args.command == "scrape":
@@ -266,6 +312,8 @@ def main():
         command_apply(args.evals_file)
     elif args.command == "update":
         command_update(args.job_id, args.status, args.note)
+    elif args.command == "ingest":
+        command_ingest(args.jobs_file)
 
 if __name__ == "__main__":
     main()
