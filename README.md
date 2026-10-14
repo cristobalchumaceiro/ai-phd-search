@@ -1,74 +1,88 @@
 # Autonomous AI PhD Tracker & ATS
 
-An automated pipeline that scrapes academic job boards (FindAPhD, jobs.ac.uk), bypasses bot-protections, and uses an AI Agent to evaluate opportunities against your personal CV. It acts as a full Application Tracking System (ATS) you can control entirely with natural language.
-
-## How It Works
-
-1. **The Python Engine (`phd_tracker.py`)**: A Playwright script that mimics human behavior to bypass Cloudflare, scraping job descriptions and safely updating your local `jobs_database.json`.
-2. **The PhD Tracker & ATS (`.agents/skills/phd-tracker/SKILL.md`)**: The primary AI skill managing daily scraping, profile evaluation, supervisor research, and ATS pipeline tracking.
-3. **The Portal Scraper (`.agents/skills/portal-scraper/SKILL.md`)**: A specialised skill that can autonomously inspect any arbitrary university, DLA, or CDT portal URL, micro-test extraction, and import all opportunities directly into the tracker.
+An agent-first research discovery engine and Application Tracking System (ATS). It pairs a robust Python backend with AI agent skills, allowing you to discover, evaluate, and track PhD opportunities entirely through natural language—with zero graphical user interface (GUI) needed.
 
 ---
 
-## 1. Setup & Configuration
+## Architecture: Core Engine + Agent Skills
 
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/cristobalchumaceiro/phd-tracker.git
-   cd phd-tracker
-   ```
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Natural Language Chat                           │
+│     "Any new jobs today?" | "Import from portal" | "Show my pipeline"   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          Agent Skills (.agents)                        │
+│   • phd-tracker: Conversational onboarding, evaluation, ATS pipeline   │
+│   • portal-scraper: Resilient scraper for bespoke university portals   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Python Engine (phd_tracker.py)                    │
+│   Automated scraping, bot-bypass, atomic database, CLI subcommands     │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+                       Local jobs_database.json
+```
 
-2. **Install Dependencies**
-   *(We highly recommend naming your virtual environment `.venv` as the AI agent is instructed to look for it there).*
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
-
-3. **Configure Your Profile**
-   Rename `user_profile.template.md` to `user_profile.md`. 
-   Paste your specific FindAPhD search URL at the top, and define your research interests, CV details, and hard constraints (e.g., funding requirements).
-   *(Note: Your data is completely private. `user_profile.md` and `jobs_database.json` are git-ignored, so your personal CV and evaluations never leave your machine).*
-
----
-
-## 2. Using the Tracker in Natural Language
-
-You do not need to memorize commands or slash shortcuts. Once setup, open your AI assistant in this repository and simply talk to it. 
-
-### Discovery Mode
-To find and evaluate new jobs, try saying:
-* *"Any new positions today?"*
-* *"Run the PhD tracker."*
-* *"Scrape for new jobs."*
-
-### Custom Portal Scraping
-If you have a link to a specific Doctoral Landscape Award (DLA), CDT, or university project portal:
-* *"Scrape and import projects from `https://www.trees-dla.ac.uk/projects`."*
-* *"Extract all PhD positions from this portal URL and evaluate them against my profile."*
-
-### ATS Mode
-To manage jobs you've already discovered, try saying:
-* *"Show me my current PhD pipeline."* (The agent will render a Kanban board).
-* *"Move job p123 to shortlisted and add a note that I emailed the supervisor."*
-* *"Add a timeline note to p123 that they rejected my application."*
+1. **The Brain (`phd_tracker.py`)**: A standalone CLI that scrapes academic job boards (FindAPhD, jobs.ac.uk), handles bot-bypass, persists opportunities atomically, and provides structured subcommands for extraction, updates, and querying.
+2. **The Skills (`.agents/skills/`)**:
+   * **`phd-tracker`**: Manages conversational profile onboarding, multi-criteria position matching, supervisor background research, and ATS pipeline tracking.
+   * **`portal-scraper`**: Autonomously inspects, caches, micro-tests, and ingests bespoke university, doctoral training, or consortium portals into the database.
 
 ---
 
-## 3. Agent Usage Instructions
+## Getting Started
 
-You can use this tracker with your preferred AI CLI assistant. Because this tool relies on a custom `SKILL.md` file to instruct the AI, usage differs slightly depending on how you interact with your assistant:
+### 1. Installation
+Clone the repository and install dependencies into a local virtual environment:
 
-### Google Antigravity (Recommended)
-Antigravity natively understands the rules in the `.agents/skills` folder. 
-* **Installation:** Follow the [official Antigravity instructions](https://github.com/google/antigravity) to install the CLI.
-* **CLI:** Run `agy` in your terminal.
-* **Usage:** Simply start talking (e.g., *"Are there any new PhD positions today?"*).
+```bash
+git clone https://github.com/cristobalchumaceiro/phd-tracker.git
+cd phd-tracker
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
 
-### Anthropic Claude Code
-Claude Code does not automatically discover the hidden `.agents/skills` folder.
-* **Installation:** Run `npm install -g @anthropic-ai/claude-code`.
-* **CLI:** Run `claude` in your terminal.
-* **Usage:** In your first prompt, tell it to read `.agents/skills/phd-tracker/SKILL.md` to learn how the system works. After that, you can interact with it naturally.
+### 2. Conversational Setup
+Launch your AI assistant inside this directory. Simply say:
+> *"Set up my PhD tracker profile."*
+
+The AI will guide you through a brief conversational interview to learn:
+* Your educational background and post-PhD career goals.
+* Your methodological approach and research style.
+* Your preferred research themes, topics, and any dealbreakers/exclusions.
+* Your hard constraints (funding requirements, fee status, geographic locations).
+
+Your preferences are saved locally to `user_profile.md`. *(Both `user_profile.md` and `jobs_database.json` are git-ignored, keeping your personal details and application history 100% private).*
+
+> **Tip on Terminal Permissions:**
+> For a completely seamless, autonomous experience, allow your assistant to run `./.venv/bin/python phd_tracker.py *` commands without confirmation prompts (e.g. selecting *"Always Allow"* on first execution in your AI CLI). All engine operations are local, sandboxed to the project, and atomic.
+
+---
+
+## Interacting with the Tracker
+
+You do not need to memorise CLI arguments or write scripts. Control the entire lifecycle by speaking to your assistant:
+
+### 1. Discovery Mode (Job Boards)
+* *"Check for new positions today."*
+* *"Run the PhD tracker and give me a rundown of top matches."*
+
+### 2. Custom Portal Ingestion
+If you have a link to a university department, Doctoral Training Partnership (DTP), or research centre portal:
+* *"Scrape and import projects from `https://www.example.ac.uk/phd-projects`."*
+* *"Extract all PhD positions from this portal and evaluate them against my profile."*
+
+### 3. Application Tracking (ATS)
+* *"Show my current application pipeline."* (Renders a Kanban-style board of active positions).
+* *"Show details for position p123."*
+* *"Move position p123 to shortlisted and note that I attended the open day."*
+* *"Update position p123 to contacted: Emailed lead supervisor Dr Smith."*
+* *"Add note to p123: Received interview invitation for next Tuesday."*

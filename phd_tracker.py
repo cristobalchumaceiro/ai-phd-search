@@ -277,6 +277,112 @@ def command_ingest(file_path):
     save_db(db)
     print(f"Ingested {added_count} new jobs into database (total database size: {len(db)}).", file=sys.stderr)
 
+def command_summary():
+    db = load_db()
+    counts = {}
+    for j in db.values():
+        st = j.get("status", "unspecified")
+        counts[st] = counts.get(st, 0) + 1
+        
+    print(f"\n{'='*20} PhD Tracker Summary {'='*20}")
+    print(f"Total Jobs in Database: {len(db)}")
+    print(f"{'-'*55}")
+    for st, count in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+        print(f"  • {st:<18} : {count} jobs")
+    print(f"{'='*55}\n")
+
+def command_list(status=None):
+    db = load_db()
+    matches = []
+    for jid, j in db.items():
+        curr_st = j.get("status", "")
+        if status:
+            if curr_st.lower() == status.lower():
+                matches.append((jid, j))
+        else:
+            if curr_st != "rejected":
+                matches.append((jid, j))
+
+    header = f"Jobs with Status '{status}'" if status else "Active Tracked Jobs (Excluding Rejected)"
+    print(f"\n=== {header} ({len(matches)} found) ===")
+    if not matches:
+        print("No matching jobs found.\n")
+        return
+
+    for jid, j in matches:
+        title = j.get("title", "Untitled")
+        curr_st = j.get("status", "unknown")
+        url = j.get("url", "")
+        reason = j.get("reason", "")
+        sups = j.get("supervisors", [])
+        if isinstance(sups, list):
+            sup_str = ", ".join([s.get("name", "") + (f" ({s.get('university')})" if s.get("university") else "") for s in sups if isinstance(s, dict)])
+        else:
+            sup_str = str(sups)
+            
+        timeline = j.get("timeline", [])
+        latest_note = f"Latest Note: {timeline[-1].get('note')} ({timeline[-1].get('timestamp', '')[:10]})" if timeline else ""
+
+        print(f"\n[{jid}] {title}")
+        print(f"  Status: {curr_st} | URL: {url}")
+        if sup_str:
+            print(f"  Supervisors: {sup_str}")
+        if reason:
+            print(f"  Reason: {reason}")
+        if latest_note:
+            print(f"  {latest_note}")
+    print()
+
+def command_show(job_id):
+    db = load_db()
+    if job_id not in db:
+        print(f"Error: Job ID '{job_id}' not found in database.", file=sys.stderr)
+        sys.exit(1)
+        
+    j = db[job_id]
+    print(f"\n{'='*70}")
+    print(f"JOB ID: {job_id}")
+    print(f"TITLE:  {j.get('title')}")
+    print(f"STATUS: {j.get('status')}")
+    print(f"URL:    {j.get('url')}")
+    if j.get("reason"):
+        print(f"REASON: {j.get('reason')}")
+        
+    sups = j.get("supervisors", [])
+    if sups:
+        print(f"\nSUPERVISORS:")
+        if isinstance(sups, list):
+            for s in sups:
+                if isinstance(s, dict):
+                    print(f"  • {s.get('name')} | Dept: {s.get('department')} | Uni: {s.get('university')} | Email: {s.get('email', 'N/A')}")
+                else:
+                    print(f"  • {s}")
+        else:
+            print(f"  {sups}")
+            
+    insts = j.get("institutions", [])
+    if insts:
+        print(f"INSTITUTIONS: {', '.join(insts) if isinstance(insts, list) else insts}")
+        
+    timeline = j.get("timeline", [])
+    if timeline:
+        print(f"\nTIMELINE:")
+        for t in timeline:
+            print(f"  • [{t.get('timestamp', '')[:19]}] {t.get('note')}")
+            
+    desc = j.get("description")
+    if desc:
+        print(f"\nDESCRIPTION:\n{desc}")
+        
+    training = j.get("training")
+    if training:
+        print(f"\nTRAINING:\n{training}")
+        
+    trajectory = j.get("trajectory")
+    if trajectory:
+        print(f"\nTRAJECTORY:\n{trajectory}")
+    print(f"{'='*70}\n")
+
 def main():
     parser = argparse.ArgumentParser(description="PhD Tracker CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -298,6 +404,14 @@ def main():
     ingest_cmd = subparsers.add_parser("ingest", help="Ingest external or portal jobs into database as unreviewed")
     ingest_cmd.add_argument("jobs_file", help="JSON file containing jobs to ingest")
 
+    subparsers.add_parser("summary", help="Print summary counts of all jobs in the database by status")
+
+    list_cmd = subparsers.add_parser("list", help="List jobs filtered by status (defaults to all non-rejected jobs)")
+    list_cmd.add_argument("--status", help="Status to filter by (e.g. pending, shortlisted, applied)")
+
+    show_cmd = subparsers.add_parser("show", help="Show complete record and timeline for a specific job")
+    show_cmd.add_argument("job_id", help="The ID of the job to display")
+
     args = parser.parse_args()
     
     if args.command == "scrape":
@@ -314,6 +428,12 @@ def main():
         command_update(args.job_id, args.status, args.note)
     elif args.command == "ingest":
         command_ingest(args.jobs_file)
+    elif args.command == "summary":
+        command_summary()
+    elif args.command == "list":
+        command_list(args.status)
+    elif args.command == "show":
+        command_show(args.job_id)
 
 if __name__ == "__main__":
     main()
