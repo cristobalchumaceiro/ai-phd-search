@@ -49,12 +49,25 @@ def scrape_findaphd(db, browser):
     Stealth().apply_stealth_sync(page_obj)
     
     page = 1
+    seen_this_run = set()
     while True:
         url = base_url if page == 1 else f"{base_url}&PG={page}"
         print(f"[FindAPhD] Scraping search page {page}...", file=sys.stderr)
         page_obj.goto(url, wait_until="domcontentloaded")
+        try:
+            page_obj.wait_for_load_state("load", timeout=10000)
+        except Exception:
+            pass
         page_obj.wait_for_timeout(3000)
-        html = page_obj.content()
+        html = None
+        for attempt in range(3):
+            try:
+                html = page_obj.content()
+                break
+            except Exception:
+                page_obj.wait_for_timeout(2000)
+        if html is None:
+            html = page_obj.content()
         soup = BeautifulSoup(html, "html.parser")
         results = soup.find_all("a", href=lambda x: x and ("/phds/project/" in x or "/phds/program" in x))
         
@@ -62,7 +75,8 @@ def scrape_findaphd(db, browser):
             print(f"[FindAPhD] No results found on page {page}. Stopping pagination.", file=sys.stderr)
             break
             
-        found_new_on_page = False
+        page_job_ids = set()
+        new_on_page = 0
         for link_elem in results:
             href = link_elem["href"]
             job_url = href if href.startswith("http") else f"https://www.findaphd.com{href if href.startswith('/') else '/' + href}"
@@ -73,13 +87,17 @@ def scrape_findaphd(db, browser):
             card = link_elem.find_parent("div", class_=lambda x: x and "row" in x)
             snippet = card.text.strip().replace("\n", " ") if card else "No snippet available."
             
+            page_job_ids.add(job_id)
             if job_id not in db:
-                found_new_on_page = True
+                new_on_page += 1
                 db[job_id] = {"title": title, "url": job_url, "status": "unreviewed", "description": snippet}
                 
-        if not found_new_on_page:
-            print("[FindAPhD] No new jobs on this page. Stopping pagination.")
+        if not page_job_ids or page_job_ids.issubset(seen_this_run):
+            print(f"[FindAPhD] No new listings on page {page} compared to current session. Reached end of pagination.", file=sys.stderr)
             break
+            
+        print(f"[FindAPhD] Page {page}: {len(page_job_ids)} listings found ({new_on_page} new to database).", file=sys.stderr)
+        seen_this_run.update(page_job_ids)
         page += 1
         
     save_db(db)
@@ -121,6 +139,7 @@ def scrape_jobsacuk(db, browser):
     
     start_index = 1
     new_jobs = {}
+    seen_this_run = set()
     
     while True:
         url = base_url if start_index == 1 else f"{base_url}&pageSize=25&startIndex={start_index}"
@@ -133,7 +152,8 @@ def scrape_jobsacuk(db, browser):
             print(f"[JobsAcUk] No results found on startIndex {start_index}. Stopping pagination.", file=sys.stderr)
             break
             
-        page_found = False
+        page_job_ids = set()
+        new_on_page = 0
         for link in links:
             href = link.get_attribute("href")
             title = link.inner_text().strip()
@@ -141,13 +161,17 @@ def scrape_jobsacuk(db, browser):
                 continue
             full_url = f"https://www.jobs.ac.uk{href}"
             job_id = href.split('/')[2] if len(href.split('/')) > 2 else href
+            page_job_ids.add(job_id)
             if job_id not in new_jobs and job_id not in db:
                 new_jobs[job_id] = {"title": title, "url": full_url, "status": "unreviewed"}
-                page_found = True
+                new_on_page += 1
                 
-        if not page_found:
-            print(f"[JobsAcUk] No new jobs on startIndex {start_index}. Stopping pagination.", file=sys.stderr)
+        if not page_job_ids or page_job_ids.issubset(seen_this_run):
+            print(f"[JobsAcUk] StartIndex {start_index} contains only previously seen listings from current session. Reached end of pagination.", file=sys.stderr)
             break
+            
+        print(f"[JobsAcUk] StartIndex {start_index}: {len(page_job_ids)} listings found ({new_on_page} new to database).", file=sys.stderr)
+        seen_this_run.update(page_job_ids)
         start_index += 25
 
     for job_id, job in new_jobs.items():
