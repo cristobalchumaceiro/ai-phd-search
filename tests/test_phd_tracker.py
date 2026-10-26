@@ -1,10 +1,12 @@
 import os
+import sys
 import io
 import json
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import phd_tracker
 
 class TestPhDTrackerCLI(unittest.TestCase):

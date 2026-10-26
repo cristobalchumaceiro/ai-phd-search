@@ -1,6 +1,6 @@
 # End-to-End (E2E) New-User Smoke Tests
 
-While `test_phd_tracker.py` tests the CLI commands and HTML parsers offline using mocks, external job boards (specifically FindAPhD's Cloudflare Turnstile configuration and DOM structure) change over time without notice.
+While `tests/test_phd_tracker.py` tests the CLI commands and HTML parsers offline using mocks (`./.venv/bin/python -m unittest discover -s tests`), external job boards (specifically FindAPhD's Cloudflare Turnstile configuration and DOM structure) change over time without notice.
 
 This directory contains a repeatable **New-User Onboarding Playbook** (`new_user_playbook.md`) designed to be executed by an AI coding agent (or subagent) in an isolated temporary directory (`--data-dir .tmp/e2e_run`).
 
