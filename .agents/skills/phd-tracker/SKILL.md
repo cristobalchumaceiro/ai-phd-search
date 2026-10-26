@@ -6,9 +6,9 @@ description: >-
 
 # PhD Tracker & ATS Runbook
 
-This skill allows users to discover, evaluate, and track PhD positions across any academic discipline (humanities, social sciences, life sciences, physical sciences, engineering, or computing) entirely through natural language.
+This skill allows users to discover, evaluate, and track PhD positions across any academic discipline entirely through natural language and structured slash commands.
 
-The AI assistant interfaces directly with the underlying Python engine (`phd_tracker.py`) via the terminal.
+The AI assistant interfaces directly with the lean, local Python engine (`phd_tracker.py`) via the terminal.
 
 ---
 
@@ -21,23 +21,23 @@ The AI assistant interfaces directly with the underlying Python engine (`phd_tra
 
 ## Engine CLI Reference (`phd_tracker.py`)
 
-The application engine provides 8 specialised subcommands. Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
+The application engine provides 9 specialised subcommands. Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
 
-1. **`scrape`**: Runs automated Playwright scrapers for configured job boards (FindAPhD, jobs.ac.uk) and adds newly discovered opportunities to the database with status `unreviewed`.
+1. **`scrape`**: Runs automated stealth Playwright scrapers for configured job boards (FindAPhD, jobs.ac.uk) with automated Cloudflare clearance and TLS session caching. Newly discovered opportunities are ingested with status `unreviewed`.
    ```bash
    ./.venv/bin/python phd_tracker.py scrape
    ```
-2. **`extract`**: Extracts jobs of a specific status from the database into an isolated JSON file (the data airlock). Defaults to `.tmp/<status>.json`.
+2. **`extract`**: Extracts jobs of a specific status from the database into a temporary JSON file. Defaults to `.tmp/<status>.json`.
    ```bash
    ./.venv/bin/python phd_tracker.py extract --status unreviewed [--out .tmp/unreviewed.json]
    ```
-3. **`apply`**: Atomically updates the status and evaluation rationale for jobs from an evaluation JSON file, then automatically cleans up the temporary file.
+3. **`apply`**: Updates the status and evaluation rationale for jobs from an evaluation JSON file, then automatically cleans up the temporary file.
    ```bash
    ./.venv/bin/python phd_tracker.py apply .tmp/evaluations.json
    ```
-4. **`update`**: Updates an individual job's ATS status and/or appends a timestamped note to its audit timeline.
+4. **`update`**: Updates an individual job's ATS status, deadline, title, and/or appends a timestamped note to its audit timeline.
    ```bash
-   ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"]
+   ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"]
    ```
 5. **`ingest`**: Safely merges external project lists (e.g. scraped university/DLA/CDT portals) into the database with status `unreviewed` using atomic write protection.
    ```bash
@@ -47,78 +47,73 @@ The application engine provides 8 specialised subcommands. Always invoke them us
    ```bash
    ./.venv/bin/python phd_tracker.py summary
    ```
-7. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered.
+7. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--urgent` to sort by nearest application deadline.
    ```bash
-   ./.venv/bin/python phd_tracker.py list [--status <status>]
+   ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent]
    ```
-8. **`show`**: Displays the complete record for a job: full title, URL, status, evaluation reason, supervisors, institutions, full description, training, trajectory, and complete timeline audit history.
+8. **`show`**: Displays the complete record for a job: full title, URL, status, deadline, evaluation reason, supervisors, institutions, full description, and complete timeline audit history.
    ```bash
    ./.venv/bin/python phd_tracker.py show <job_id>
    ```
+9. **`clean`**: Runs data hygiene across the database, stripping enquiry modal boilerplate and auto-detecting application deadlines.
+   ```bash
+   ./.venv/bin/python phd_tracker.py clean
+   ```
 
 ---
 
-## Mode 0: Profile Onboarding & Setup (Conversational Interview)
-Trigger this mode automatically whenever `user_profile.md` does **not** exist in the workspace, or when the user says *"Set up my profile"*.
+## The 5-Command Lifecycle
 
-1. **Do not fail, and do not ask the user to manually edit files.**
-2. Proactively ask the user 4 concise, discipline-agnostic interview questions:
-   * **Academic Background & Aspirations:** What is your educational background, current degree, and target post-PhD career goal (e.g. academia, industry research labs, public policy, clinical practice, entrepreneurship)?
-   * **Methodological Orientation:** What research style do you want to pursue? (e.g., theoretical/foundational, experimental lab work, computational/data-driven, field research, qualitative/archival studies)? Do you prefer developing novel methods/tools yourself, or applying existing frameworks to new problems?
-   * **Topics, Themes & Exclusions:** What specific subjects or research questions excite you most? Are there any topics, subfields, or project types you strictly want to avoid?
-   * **Hard Constraints & Search URLs:** What are your non-negotiable constraints (e.g. fully funded only, Home vs International fee status, location requirements)? Do you have specific search URLs from FindAPhD or jobs.ac.uk, or will you provide custom university portal links?
-3. Synthesise their responses into a clean, structured `user_profile.md` file:
-   * Place any target search URLs at the very top: `**FindAPhD_URL:** <url>` and `**JobsAcUk_URL:** <url>`.
-   * Structure remaining sections clearly: Background & Career Goals, Methodological Approach, Core Research Themes, Project Exclusions, Supervisory Preferences, and Hard Constraints.
+### 1. `/setup` — Research Profile Onboarding
+Trigger this command whenever `user_profile.md` does not exist, or when the user says *"Set up my profile"*.
 
----
+1. **Do not ask the user to manually edit files.**
+2. Conduct a concise conversational interview covering:
+   - **Academic Background & Aspirations:** Degrees, disciplines, and career ambitions (academia, research labs, industry).
+   - **Methodological Approach:** Theoretical, experimental, computational, data-driven, or qualitative.
+   - **Research Themes & Exclusions:** Specific questions/topics of interest and topics strictly excluded.
+   - **Hard Constraints & URLs:** Funding requirements (Home/International, stipends), geographical constraints, and target FindAPhD / jobs.ac.uk search URLs.
+3. Synthesise their responses into `user_profile.md` with URLs pinned at the top:
+   `**FindAPhD_URL:** <url>` and `**JobsAcUk_URL:** <url>`.
 
-## Mode 1: Discovery & Evaluation (Finding & Matching Jobs)
-Use this mode when the user says *"Check for new jobs"*, *"Run the PhD tracker"*, or asks for a daily rundown.
+### 2. `/find` — Discovery & Ingestion
+Trigger when the user wants to check for new PhD opportunities.
+1. Run `./.venv/bin/python phd_tracker.py scrape`.
+2. Inspect the newly scraped count and summarise newly added opportunities.
 
-1. **Verify Profile:** Ensure `user_profile.md` exists (trigger Mode 0 first if missing).
-2. **Scrape or Ingest**:
-   * For daily checks on aggregate boards: run `./.venv/bin/python phd_tracker.py scrape`.
-   * *(Note: If projects were just imported via `portal-scraper` using `phd_tracker.py ingest`, skip scraping and proceed directly to Step 3).*
-3. **Extract Unreviewed Jobs**:
-   * Run `./.venv/bin/python phd_tracker.py extract --status unreviewed --out .tmp/unreviewed.json`
-4. **Evaluate Against Profile**:
-   * Read `.tmp/unreviewed.json` and `user_profile.md`.
-   * **Circuit Breaker:** If `.tmp/unreviewed.json` is empty, inform the user: *"No new unreviewed positions found today."* and stop.
-   * Evaluate each job strictly against the user's hard constraints (funding, fee eligibility, location) and alignment with their research themes and methodology.
-   * Categorise each job: `pending` (strong match), `rejected` (does not meet criteria/disliked), or `manual_review` (ambiguous).
-5. **Apply Decisions to Database**:
-   * Create `.tmp/evaluations.json` mapping job IDs to decisions:
-     ```json
-     {
-       "job_id_1": {"status": "pending", "reason": "Strong match with primary research themes."},
-       "job_id_2": {"status": "rejected", "reason": "Self-funded position; violates funding constraint."}
-     }
-     ```
-   * Run `./.venv/bin/python phd_tracker.py apply .tmp/evaluations.json`.
-6. **Supervisor Research**: For each job promoted to `pending`, invoke a `research` subagent to search for the lead supervisor's publications, recent research directions, and academic group. Run subagents concurrently via `invoke_subagent`.
-7. **Deliver Comprehensive Rundown**:
-   * **Rejected Positions:** Title, institution, and 1-sentence rejection rationale.
-   * **Manual Review Positions:** Title, institution, and specific ambiguity needing user input.
-   * **Pending (Shortlisted) Positions:** Title (clickable markdown link), Institution, Research Overview, Alignment with Profile, and Supervisor Profile.
+### 3. `/match` — Profile Matching
+Trigger when the user wants to evaluate unreviewed opportunities against their profile.
+1. Extract unreviewed positions:
+   ```bash
+   ./.venv/bin/python phd_tracker.py extract --status unreviewed --out .tmp/unreviewed.json
+   ```
+2. **Circuit Breaker:** If `.tmp/unreviewed.json` contains 0 jobs, notify the user: *"No new unreviewed positions found."*
+3. Read `.tmp/unreviewed.json` and `user_profile.md`.
+4. Evaluate each job against hard constraints and research fit. Categorise as:
+   - `pending` (strong match with research interests and funding criteria)
+   - `rejected` (fails funding, fee eligibility, or topic preferences)
+   - `manual_review` (ambiguous or borderline fit)
+5. Write decisions to `.tmp/evaluations.json` and apply:
+   ```bash
+   ./.venv/bin/python phd_tracker.py apply .tmp/evaluations.json
+   ```
+6. Present a concise match digest to the user highlighting promoted positions with reasons.
 
----
+### 4. `/research <job_id>` — Project & Supervisor Research
+Trigger when the user requests deeper intelligence on a specific position or supervisor.
+- Hand off to the dedicated `phd-researcher` skill (`.agents/skills/phd-researcher/SKILL.md`).
+- Generates:
+  1. Project Requirements & Jargon Breakdown (explains technical methods and notes unstated details like funding or compute access).
+  2. Supervisor & Lab Background (recent publications, grants, and research direction).
+  3. Recommended Reading (2–3 relevant papers) and suggested questions to ask supervisors.
 
-## Mode 2: ATS Tracking (Pipeline Management)
-Use this mode when the user wants to manage their active applications, view their pipeline, or record updates.
-
-**Valid ATS Statuses:**
-`pending` (Initial match), `shortlisted`, `contacted`, `applied`, `interviewing`, `offered`, `rejected_post_app`.
-
-1. **Viewing the Pipeline (Kanban Board):**
-   * Run `./.venv/bin/python phd_tracker.py list` to inspect active positions.
-   * Present a clear Kanban-style markdown board grouping jobs by ATS status. Include job title, institution, link, match reason, and latest timeline note.
-2. **Inspecting a Specific Job:**
-   * Run `./.venv/bin/python phd_tracker.py show <job_id>` to display full project details, description, supervisors, and timeline history.
-3. **Updating Job Status:**
-   * Run `./.venv/bin/python phd_tracker.py update <job_id> --status <new_status> --note "<optional_note>"`.
-   * Example: `./.venv/bin/python phd_tracker.py update p123 --status contacted --note "Emailed lead supervisor Dr Smith"`.
-4. **Adding Timeline Notes:**
-   * Run `./.venv/bin/python phd_tracker.py update <job_id> --note "<note>"`.
-   * Example: `./.venv/bin/python phd_tracker.py update p123 --note "Attended virtual department open day"`.
-5. **Confirmation:** Report the change to the user with the updated status and timeline snippet.
+### 5. `/summary` — Pipeline Overview & Deadlines
+Trigger when the user wants a high-level status of their applications.
+1. Run `./.venv/bin/python phd_tracker.py summary` to get exact status counts.
+2. Run `./.venv/bin/python phd_tracker.py list --urgent` to list active positions sorted by closing date.
+3. Render a clean Markdown Kanban pipeline:
+   - **Shortlisted / Pending Review**
+   - **Contacted / Informal Discussions**
+   - **Applied (Awaiting Decision)**
+   - **Interviewing / Offers**
+4. Highlight upcoming deadlines in the next 14–30 days.

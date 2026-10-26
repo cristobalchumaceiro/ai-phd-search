@@ -1,88 +1,113 @@
-# Autonomous AI PhD Tracker & ATS
+# PhD Tracker
 
-An agent-first research discovery engine and Application Tracking System (ATS). It pairs a robust Python backend with AI agent skills, allowing you to discover, evaluate, and track PhD opportunities entirely through natural language—with zero graphical user interface (GUI) needed.
+A tool for discovering and tracking PhD positions, inspired by [`ai-job-search`](https://github.com/ai-job-search-dev/ai-job-search).
+
+You interact with an AI assistant in chat, and the assistant runs the local Python script (`phd_tracker.py`) to scrape listings, evaluate matches, and update your application pipeline.
 
 ---
 
-## Architecture: Core Engine + Agent Skills
+## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Natural Language Chat                           │
-│     "Any new jobs today?" | "Import from portal" | "Show my pipeline"   │
+│                              Chat Interface                            │
+│      /setup  |  /find  |  /match  |  /research <id>  |  /summary       │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                          Agent Skills (.agents)                        │
-│   • phd-tracker: Conversational onboarding, evaluation, ATS pipeline   │
-│   • portal-scraper: Resilient scraper for bespoke university portals   │
+│                        Agent Skills (.agents/)                         │
+│   • phd-tracker: Profile onboarding, matching, and pipeline tracking   │
+│   • phd-researcher: Project breakdown, supervisor lookup, reading lists │
+│   • portal-scraper: Scraper for university and CDT project pages       │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                      Python Engine (phd_tracker.py)                    │
-│   Automated scraping, bot-bypass, atomic database, CLI subcommands     │
+│                     Python Engine (phd_tracker.py)                     │
+│   Web scraping, description cleaner, deadline extraction, local storage│
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
-                       Local jobs_database.json
+                        jobs_database.json
 ```
 
-1. **The Brain (`phd_tracker.py`)**: A standalone CLI that scrapes academic job boards (FindAPhD, jobs.ac.uk), handles bot-bypass, persists opportunities atomically, and provides structured subcommands for extraction, updates, and querying.
-2. **The Skills (`.agents/skills/`)**:
-   * **`phd-tracker`**: Manages conversational profile onboarding, multi-criteria position matching, supervisor background research, and ATS pipeline tracking.
-   * **`portal-scraper`**: Autonomously inspects, caches, micro-tests, and ingests bespoke university, doctoral training, or consortium portals into the database.
+* **The Engine (`phd_tracker.py`)**: A Python CLI that scrapes academic job boards (FindAPhD, jobs.ac.uk), strips enquiry forms and boilerplate from project descriptions, extracts application deadlines, and stores listings in a local JSON database.
+* **The Skills (`.agents/skills/`)**:
+  * **`phd-tracker`**: Handles profile setup, matches positions against your preferences, and manages your application pipeline.
+  * **`phd-researcher`**: Researches project details, decodes technical jargon, looks up supervisor publications, and suggests preparatory reading.
+  * **`portal-scraper`**: Scrapes bespoke university, CDT, or DTP project portals.
+
+---
+
+## Commands
+
+| Command | Action | Description |
+| :--- | :--- | :--- |
+| **`/setup`** | Profile Setup | Sets up your research profile through a short chat interview (background, topics, funding, and search URLs). |
+| **`/find`** | Find Positions | Scrapes new listings from configured job boards. |
+| **`/match`** | Profile Matching | Evaluates unreviewed positions against your profile, categorising matches and rejections. |
+| **`/research <id>`** | Project Research | Breaks down project requirements, decodes jargon, looks up supervisor publications, and suggests relevant papers to read. |
+| **`/summary`** | Pipeline Summary | Shows application counts and active positions sorted by deadline. |
 
 ---
 
 ## Getting Started
 
 ### 1. Installation
-Clone the repository and install dependencies into a local virtual environment:
+Clone the repository and set up a Python virtual environment:
 
 ```bash
 git clone https://github.com/cristobalchumaceiro/phd-tracker.git
 cd phd-tracker
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Conversational Setup
-Launch your AI assistant inside this directory. Simply say:
-> *"Set up my PhD tracker profile."*
+### 2. Profile Setup
+Launch your AI assistant inside this directory and run `/setup` (or say *"Set up my PhD tracker profile"*).
 
-The AI will guide you through a brief conversational interview to learn:
-* Your educational background and post-PhD career goals.
-* Your methodological approach and research style.
-* Your preferred research themes, topics, and any dealbreakers/exclusions.
-* Your hard constraints (funding requirements, fee status, geographic locations).
+The assistant will ask a few questions about:
+* Academic background and career goals
+* Research interests, methods, and excluded topics
+* Funding requirements and location preferences
+* Search query URLs from FindAPhD or jobs.ac.uk
 
-Your preferences are saved locally to `user_profile.md`. *(Both `user_profile.md` and `jobs_database.json` are git-ignored, keeping your personal details and application history 100% private).*
-
-> **Tip on Terminal Permissions:**
-> For a completely seamless, autonomous experience, allow your assistant to run `./.venv/bin/python phd_tracker.py *` commands without confirmation prompts (e.g. selecting *"Always Allow"* on first execution in your AI CLI). All engine operations are local, sandboxed to the project, and atomic.
+Your preferences are saved locally to `user_profile.md`. Both `user_profile.md` and `jobs_database.json` are git-ignored to keep your data private.
 
 ---
 
-## Interacting with the Tracker
+## CLI Reference
 
-You do not need to memorise CLI arguments or write scripts. Control the entire lifecycle by speaking to your assistant:
+The engine can also be run directly from the terminal via `./.venv/bin/python phd_tracker.py <command>`:
 
-### 1. Discovery Mode (Job Boards)
-* *"Check for new positions today."*
-* *"Run the PhD tracker and give me a rundown of top matches."*
+```bash
+# 1. Scrape new jobs from configured boards
+./.venv/bin/python phd_tracker.py scrape
 
-### 2. Custom Portal Ingestion
-If you have a link to a university department, Doctoral Training Partnership (DTP), or research centre portal:
-* *"Scrape and import projects from `https://www.example.ac.uk/phd-projects`."*
-* *"Extract all PhD positions from this portal and evaluate them against my profile."*
+# 2. Extract unreviewed positions for evaluation
+./.venv/bin/python phd_tracker.py extract --status unreviewed --out .tmp/unreviewed.json
 
-### 3. Application Tracking (ATS)
-* *"Show my current application pipeline."* (Renders a Kanban-style board of active positions).
-* *"Show details for position p123."*
-* *"Move position p123 to shortlisted and note that I attended the open day."*
-* *"Update position p123 to contacted: Emailed lead supervisor Dr Smith."*
-* *"Add note to p123: Received interview invitation for next Tuesday."*
+# 3. Apply evaluation decisions
+./.venv/bin/python phd_tracker.py apply .tmp/evaluations.json
+
+# 4. View active applications sorted by nearest deadline
+./.venv/bin/python phd_tracker.py list --urgent
+
+# 5. Display details and timeline for a position
+./.venv/bin/python phd_tracker.py show <job_id>
+
+# 6. Update status, deadline, title, or timeline note
+./.venv/bin/python phd_tracker.py update <job_id> --status applied --note "Submitted online application"
+
+# 7. Print summary counts by status
+./.venv/bin/python phd_tracker.py summary
+
+# 8. Ingest bespoke portal scrape results
+./.venv/bin/python phd_tracker.py ingest <path_to_json>
+
+# 9. Clean database entries and auto-detect deadlines
+./.venv/bin/python phd_tracker.py clean
+```

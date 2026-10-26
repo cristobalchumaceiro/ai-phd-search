@@ -5,6 +5,8 @@ __pycache__/
 
 # Local database (keeps your processed jobs private/local)
 jobs_database.json
+jobs_database*.json
+*.backup.json
 
 # Personal documents
 cv.pdf
@@ -15,9 +17,7 @@ user_profile.md
 .tmp/
 generate_report.py
 
-# Tests
-test_phd_tracker.py
-
 # Ephemeral tasks, benchmarks, and scraper cache
 tasks/
+docs/
 .browser_profile/

@@ -42,6 +42,137 @@ def get_target_url(key):
         pass
     return None
 
+MONTHS_MAP = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+def parse_deadline(text):
+    """Parses standard UK PhD application closing dates into ISO YYYY-MM-DD.
+    Returns None if no unambiguous deadline date is detected.
+    """
+    if not text:
+        return None
+
+    # Pattern 1: ISO YYYY-MM-DD following deadline keywords
+    m_iso = re.search(r"(?:deadline|closing date|closes|apply by|applications close)[\s:]+(\d{4}-\d{2}-\d{2})", text, re.I)
+    if m_iso:
+        return m_iso.group(1)
+
+    # Pattern 2: DD Month YYYY (e.g. 23 November 2026 or 23rd Nov 2026)
+    m_text = re.search(
+        r"(?:deadline|closing date|closes|apply by|applications close)[\s:\w]*(?:on|by|at)?[\s:]+(\d{1,2})(?:st|nd|rd|th)?[\s]+([A-Za-z]+)[\s]+(202\d)",
+        text,
+        re.I
+    )
+    if m_text:
+        day = int(m_text.group(1))
+        month_str = m_text.group(2).lower()
+        year = int(m_text.group(3))
+        month = MONTHS_MAP.get(month_str)
+        if month and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+
+    # Pattern 2b: Date first then "Online applications close" / "deadline"
+    m_rev = re.search(
+        r"(\d{1,2})(?:st|nd|rd|th)?[\s]+([A-Za-z]+)[\s]+(202\d)[^.\n]*?(?:deadline|closing date|applications close|closes)",
+        text,
+        re.I
+    )
+    if m_rev:
+        day = int(m_rev.group(1))
+        month_str = m_rev.group(2).lower()
+        year = int(m_rev.group(3))
+        month = MONTHS_MAP.get(month_str)
+        if month and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+
+    # Pattern 3: DD/MM/YYYY
+    m_slash = re.search(r"(?:deadline|closing date|closes|apply by)[\s:]+(\d{1,2})/(\d{1,2})/(202\d)", text, re.I)
+    if m_slash:
+        day = int(m_slash.group(1))
+        month = int(m_slash.group(2))
+        year = int(m_slash.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+
+    return None
+
+def sanitise_html_text(html_content):
+    """Sanitises raw HTML by decomposing non-content tags (form, select, option,
+    nav, footer, header, script, style, modals, cookies) and returning clean body text.
+    """
+    if not html_content:
+        return ""
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup.select("form, select, option, nav, footer, header, script, style, noscript, .modal, [class*='modal'], [id*='modal'], [class*='cookie'], [id*='cookie']"):
+        tag.decompose()
+
+    desc_elem = soup.select_one(
+        ".phd-sections__description, .phd-project-description, .project-description, "
+        ".phd-programme-description, .programme-description, .course-description, .instProgDesc, "
+        ".dept-desc, article, main"
+    )
+    if not desc_elem:
+        desc_elem = soup.find("body") or soup
+
+    text = desc_elem.get_text("\n", strip=True)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n\n".join(lines)
+
+def clean_job_title(raw_title="", link_elem=None, card=None):
+    """Extracts a clean, concise project title, stripping boilerplate buttons
+    ("More details", "Read more"), institution names, and card fragments.
+    """
+    title = ""
+    if link_elem:
+        heading = link_elem.find(["h1", "h2", "h3", "h4", "h5"])
+        if heading:
+            title = heading.get_text(" ", strip=True)
+        elif hasattr(link_elem, "get") and "phd-result__title" in link_elem.get("class", []):
+            title = link_elem.get_text(" ", strip=True)
+
+    if not title and card:
+        card_title_elem = card.select_one(".phd-result__title, h3, h4")
+        if card_title_elem:
+            title = card_title_elem.get_text(" ", strip=True)
+
+    if not title:
+        title = raw_title or (link_elem.get_text(" ", strip=True) if link_elem else "")
+
+    title = re.sub(r"\s+", " ", title).strip()
+
+    prefixes = [
+        r"^more\s+details\s*",
+        r"^read\s+more\s*",
+        r"^view\s+programme\s*",
+        r"^find\s+out\s+more\s*",
+    ]
+    suffixes = [
+        r"\s*more\s+details$",
+        r"\s*read\s+more$",
+        r"\s*view\s+programme$",
+        r"\s*find\s+out\s+more$",
+        r"\s*Funded\s+PhD\s+Programme.*$",
+    ]
+
+    changed = True
+    while changed:
+        changed = False
+        for p in prefixes:
+            new_title = re.sub(p, "", title, flags=re.I).strip()
+            if new_title != title:
+                title = new_title
+                changed = True
+        for s in suffixes:
+            new_title = re.sub(s, "", title, flags=re.I).strip()
+            if new_title != title:
+                title = new_title
+                changed = True
+
+    return title
+
 def wait_for_cloudflare(page_obj, timeout_ms=20000):
     title = page_obj.title().lower()
     challenge_indicators = ["just a moment", "attention required", "checking your browser"]
@@ -156,17 +287,21 @@ def scrape_findaphd(db, browser_or_context):
         for link_elem in results:
             href = link_elem["href"]
             job_url = href if href.startswith("http") else f"https://www.findaphd.com{href if href.startswith('/') else '/' + href}"
-            title = link_elem.text.replace("\n", "").strip()
+            card = link_elem.find_parent("div", class_=lambda x: x and "row" in x)
+            title = clean_job_title(link_elem.text, link_elem=link_elem, card=card)
             if not title:
                 continue
             job_id = href.split("?")[-1] if "?" in href else href.strip("/")
-            card = link_elem.find_parent("div", class_=lambda x: x and "row" in x)
             snippet = card.text.strip().replace("\n", " ") if card else "No snippet available."
 
             page_job_ids.add(job_id)
             if job_id not in db:
                 new_on_page += 1
-                db[job_id] = {"title": title, "url": job_url, "status": "unreviewed", "description": snippet}
+                new_entry = {"title": title, "url": job_url, "status": "unreviewed", "description": snippet}
+                dl = parse_deadline(snippet)
+                if dl:
+                    new_entry["deadline"] = dl
+                db[job_id] = new_entry
 
         if not page_job_ids or page_job_ids.issubset(seen_this_run):
             print(f"[FindAPhD] No new listings on page {page} compared to current session. Reached end of pagination.", file=sys.stderr)
@@ -201,14 +336,14 @@ def scrape_findaphd(db, browser_or_context):
                     time.sleep(random.uniform(0.5, 1.5))
                     resp = curl_session.get(job_data['url'], timeout=12)
                     if resp.status_code == 200:
-                        sp = BeautifulSoup(resp.text, "html.parser")
-                        desc_elem = sp.select_one(".phd-sections__description, .phd-project-description, .project-description")
-                        if desc_elem:
-                            desc_text = desc_elem.get_text("\n", strip=True)
-                            if desc_text:
-                                job_data['description'] = desc_text
-                                description_extracted = True
-                                save_db(db)
+                        desc_text = sanitise_html_text(resp.text)
+                        if desc_text:
+                            job_data['description'] = desc_text
+                            dl = parse_deadline(desc_text)
+                            if dl:
+                                job_data['deadline'] = dl
+                            description_extracted = True
+                            save_db(db)
                 except Exception as e:
                     print(f"[FindAPhD] curl_cffi fetch failed ({e}), falling back to browser...", file=sys.stderr)
 
@@ -224,15 +359,13 @@ def scrape_findaphd(db, browser_or_context):
                         pass
                     page_obj.evaluate("window.scrollBy(0, 500)")
                     time.sleep(1)
-                    content = page_obj.evaluate("""() => {
-                        const desc = document.querySelector('.phd-sections__description') || document.querySelector('.phd-project-description') || document.querySelector('.project-description');
-                        if (desc) return desc.innerText;
-                        if (!document.body.innerText.includes("Sorry, you have been blocked") && !document.title.toLowerCase().includes("just a moment")) return document.body.innerText;
-                        return "Cloudflare Blocked";
-                    }""")
-                    if content and content != "Cloudflare Blocked":
-                        job_data['description'] = content
-                    # Retain search card snippet if blocked (do not overwrite with "Cloudflare Blocked")
+                    content_html = page_obj.content()
+                    clean_desc = sanitise_html_text(content_html)
+                    if clean_desc and "Sorry, you have been blocked" not in clean_desc and not any(ind in clean_desc.lower() for ind in ["just a moment", "attention required"]):
+                        job_data['description'] = clean_desc
+                        dl = parse_deadline(clean_desc)
+                        if dl:
+                            job_data['deadline'] = dl
                     save_db(db)
                 except Exception as e:
                     print(f"[FindAPhD] Failed to fetch {job_data['url']}: {e}", file=sys.stderr)
@@ -301,8 +434,12 @@ def scrape_jobsacuk(db, browser_or_context):
             page_obj.evaluate("window.scrollBy(0, 500)")
             time.sleep(random.uniform(2, 4))
             page_obj.evaluate("window.scrollBy(0, 500)")
-            desc = page_obj.evaluate("document.body.innerText")
-            job["description"] = desc.strip() if desc else "Failed to extract description."
+            html_content = page_obj.content()
+            clean_desc = sanitise_html_text(html_content)
+            job["description"] = clean_desc if clean_desc else "Failed to extract description."
+            dl = parse_deadline(clean_desc)
+            if dl:
+                job["deadline"] = dl
         except Exception as e:
             print(f"[JobsAcUk] Failed to fetch {job['url']}: {e}", file=sys.stderr)
             job["description"] = "Failed to fetch."
@@ -378,9 +515,9 @@ def command_apply(evals_file):
     except:
         pass
 
-def command_update(job_id, status, note):
-    if not status and not note:
-        print("Error: Must provide at least --status or --note to update.", file=sys.stderr)
+def command_update(job_id, status=None, note=None, deadline=None, title=None):
+    if not status and not note and not deadline and not title:
+        print("Error: Must provide at least --status, --note, --deadline, or --title to update.", file=sys.stderr)
         sys.exit(1)
 
     db = load_db()
@@ -392,6 +529,13 @@ def command_update(job_id, status, note):
     
     if status:
         job['status'] = status
+
+    if title:
+        job['title'] = clean_job_title(title)
+
+    if deadline:
+        parsed_dl = parse_deadline(deadline) or deadline
+        job['deadline'] = parsed_dl
         
     if note:
         job.setdefault('timeline', []).append({
@@ -401,6 +545,35 @@ def command_update(job_id, status, note):
         
     save_db(db)
     print(f"Successfully updated job '{job_id}'.", file=sys.stderr)
+
+def command_clean():
+    db = load_db()
+    cleaned_fields = 0
+    deadlines_found = 0
+    for jid, job in db.items():
+        title = job.get("title", "")
+        clean_t = clean_job_title(title)
+        if clean_t and clean_t != title:
+            job["title"] = clean_t
+            cleaned_fields += 1
+            
+        desc = job.get("description", "")
+        if "Select your nationality" in desc or "Afghanistan (+93)" in desc:
+            cut_idx = desc.find("Register your interest for this PhD")
+            if cut_idx != -1:
+                desc = desc[:cut_idx].strip()
+                job["description"] = desc
+                cleaned_fields += 1
+
+        if not job.get("deadline"):
+            dl = parse_deadline(desc)
+            if dl:
+                job["deadline"] = dl
+                deadlines_found += 1
+                cleaned_fields += 1
+
+    save_db(db)
+    print(f"Hygiene pass complete: cleaned {cleaned_fields} fields and identified {deadlines_found} deadlines across {len(db)} records.", file=sys.stderr)
 
 def command_ingest(file_path):
     if not os.path.exists(file_path):
@@ -430,12 +603,16 @@ def command_ingest(file_path):
     added_count = 0
     for job_id, job in jobs_dict.items():
         if job_id not in db:
+            desc = job.get("description", "")
+            dl = job.get("deadline") or parse_deadline(desc)
             db[job_id] = {
                 "title": job.get("title", ""),
                 "url": job.get("url", ""),
                 "status": "unreviewed",
-                "description": job.get("description", "")
+                "description": desc
             }
+            if dl:
+                db[job_id]["deadline"] = dl
             if "supervisors" in job:
                 db[job_id]["supervisors"] = job["supervisors"]
             if "institutions" in job:
@@ -459,7 +636,7 @@ def command_summary():
         print(f"  • {st:<18} : {count} jobs")
     print(f"{'='*55}\n")
 
-def command_list(status=None):
+def command_list(status=None, urgent=False):
     db = load_db()
     matches = []
     for jid, j in db.items():
@@ -471,7 +648,11 @@ def command_list(status=None):
             if curr_st != "rejected":
                 matches.append((jid, j))
 
-    header = f"Jobs with Status '{status}'" if status else "Active Tracked Jobs (Excluding Rejected)"
+    if urgent:
+        matches.sort(key=lambda item: (item[1].get("deadline") is None, item[1].get("deadline", "9999-99-99")))
+
+    urgent_tag = " [Sorted by Nearest Deadline]" if urgent else ""
+    header = f"Jobs with Status '{status}'{urgent_tag}" if status else f"Active Tracked Jobs (Excluding Rejected){urgent_tag}"
     print(f"\n=== {header} ({len(matches)} found) ===")
     if not matches:
         print("No matching jobs found.\n")
@@ -481,6 +662,7 @@ def command_list(status=None):
         title = j.get("title", "Untitled")
         curr_st = j.get("status", "unknown")
         url = j.get("url", "")
+        deadline = j.get("deadline", "")
         reason = j.get("reason", "")
         sups = j.get("supervisors", [])
         if isinstance(sups, list):
@@ -492,7 +674,8 @@ def command_list(status=None):
         latest_note = f"Latest Note: {timeline[-1].get('note')} ({timeline[-1].get('timestamp', '')[:10]})" if timeline else ""
 
         print(f"\n[{jid}] {title}")
-        print(f"  Status: {curr_st} | URL: {url}")
+        dl_str = f" | Deadline: {deadline}" if deadline else ""
+        print(f"  Status: {curr_st}{dl_str} | URL: {url}")
         if sup_str:
             print(f"  Supervisors: {sup_str}")
         if reason:
@@ -512,6 +695,8 @@ def command_show(job_id):
     print(f"JOB ID: {job_id}")
     print(f"TITLE:  {j.get('title')}")
     print(f"STATUS: {j.get('status')}")
+    if j.get("deadline"):
+        print(f"DEADLINE: {j.get('deadline')}")
     print(f"URL:    {j.get('url')}")
     if j.get("reason"):
         print(f"REASON: {j.get('reason')}")
@@ -568,14 +753,18 @@ def main():
     update_cmd.add_argument("job_id", help="The ID of the job to update")
     update_cmd.add_argument("--status", help="New status for the job")
     update_cmd.add_argument("--note", help="Note to append to the job's timeline")
+    update_cmd.add_argument("--deadline", help="Application deadline date (YYYY-MM-DD)")
+    update_cmd.add_argument("--title", help="Updated clean title for the job")
     
     ingest_cmd = subparsers.add_parser("ingest", help="Ingest external or portal jobs into database as unreviewed")
     ingest_cmd.add_argument("jobs_file", help="JSON file containing jobs to ingest")
 
     subparsers.add_parser("summary", help="Print summary counts of all jobs in the database by status")
+    subparsers.add_parser("clean", help="Sanitise database entries and auto-detect deadlines from descriptions")
 
     list_cmd = subparsers.add_parser("list", help="List jobs filtered by status (defaults to all non-rejected jobs)")
     list_cmd.add_argument("--status", help="Status to filter by (e.g. pending, shortlisted, applied)")
+    list_cmd.add_argument("--urgent", action="store_true", help="Sort active jobs by nearest application deadline")
 
     show_cmd = subparsers.add_parser("show", help="Show complete record and timeline for a specific job")
     show_cmd.add_argument("job_id", help="The ID of the job to display")
@@ -593,13 +782,15 @@ def main():
     elif args.command == "apply":
         command_apply(args.evals_file)
     elif args.command == "update":
-        command_update(args.job_id, args.status, args.note)
+        command_update(args.job_id, args.status, args.note, args.deadline, args.title)
     elif args.command == "ingest":
         command_ingest(args.jobs_file)
     elif args.command == "summary":
         command_summary()
+    elif args.command == "clean":
+        command_clean()
     elif args.command == "list":
-        command_list(args.status)
+        command_list(args.status, args.urgent)
     elif args.command == "show":
         command_show(args.job_id)
 
