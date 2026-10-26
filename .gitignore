@@ -8,8 +8,11 @@ jobs_database.json
 jobs_database*.json
 *.backup.json
 
-# Personal documents
+# Personal documents (keep everything in docs/ private except .gitkeep)
 cv.pdf
+*.pdf
+docs/*
+!docs/.gitkeep
 
 # OS files
 .DS_Store
@@ -17,7 +20,6 @@ user_profile.md
 .tmp/
 generate_report.py
 
-# Ephemeral tasks, benchmarks, and scraper cache
+# Ephemeral tasks and browser cache
 tasks/
-docs/
 .browser_profile/

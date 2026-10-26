@@ -7,16 +7,28 @@ import os
 import random
 import datetime
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
+try:
+    from patchright.sync_api import sync_playwright
+except ImportError:
+    from playwright.sync_api import sync_playwright
 try:
     from curl_cffi import requests as cffi_requests
 except ImportError:
     cffi_requests = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROFILE_PATH = os.path.join(SCRIPT_DIR, "user_profile.md")
-DB_PATH = os.path.join(SCRIPT_DIR, "jobs_database.json")
+DATA_DIR = os.environ.get("PHD_TRACKER_DATA_DIR") or SCRIPT_DIR
+PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.md")
+DB_PATH = os.path.join(DATA_DIR, "jobs_database.json")
+BROWSER_PROFILE_DIR = os.path.join(DATA_DIR, ".browser_profile")
+
+def set_data_dir(data_dir):
+    global DATA_DIR, PROFILE_PATH, DB_PATH, BROWSER_PROFILE_DIR
+    DATA_DIR = os.path.abspath(data_dir)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.md")
+    DB_PATH = os.path.join(DATA_DIR, "jobs_database.json")
+    BROWSER_PROFILE_DIR = os.path.join(DATA_DIR, ".browser_profile")
 
 def load_db():
     try:
@@ -56,13 +68,13 @@ def parse_deadline(text):
         return None
 
     # Pattern 1: ISO YYYY-MM-DD following deadline keywords
-    m_iso = re.search(r"(?:deadline|closing date|closes|apply by|applications close)[\s:]+(\d{4}-\d{2}-\d{2})", text, re.I)
+    m_iso = re.search(r"(?:deadline|closing date|closes|apply by|applications close)[ \t:]+(\d{4}-\d{2}-\d{2})", text, re.I)
     if m_iso:
         return m_iso.group(1)
 
-    # Pattern 2: DD Month YYYY (e.g. 23 November 2026 or 23rd Nov 2026)
+    # Pattern 2: DD Month YYYY on the same line after deadline keywords
     m_text = re.search(
-        r"(?:deadline|closing date|closes|apply by|applications close)[\s:\w]*(?:on|by|at)?[\s:]+(\d{1,2})(?:st|nd|rd|th)?[\s]+([A-Za-z]+)[\s]+(202\d)",
+        r"(?:deadline|closing date|closes|apply by|applications close)[ \t:\w]*(?:on|by|at)?[ \t:]+(\d{1,2})(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)",
         text,
         re.I
     )
@@ -74,9 +86,9 @@ def parse_deadline(text):
         if month and 1 <= day <= 31:
             return f"{year:04d}-{month:02d}-{day:02d}"
 
-    # Pattern 2b: Date first then "Online applications close" / "deadline"
+    # Pattern 2b: Date first then "Online applications close" / "deadline" on the same line
     m_rev = re.search(
-        r"(\d{1,2})(?:st|nd|rd|th)?[\s]+([A-Za-z]+)[\s]+(202\d)[^.\n]*?(?:deadline|closing date|applications close|closes)",
+        r"(\d{1,2})(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)[^.\n]*?(?:deadline|closing date|applications close|closes)",
         text,
         re.I
     )
@@ -89,7 +101,7 @@ def parse_deadline(text):
             return f"{year:04d}-{month:02d}-{day:02d}"
 
     # Pattern 3: DD/MM/YYYY
-    m_slash = re.search(r"(?:deadline|closing date|closes|apply by)[\s:]+(\d{1,2})/(\d{1,2})/(202\d)", text, re.I)
+    m_slash = re.search(r"(?:deadline|closing date|closes|apply by)[ \t:]+(\d{1,2})/(\d{1,2})/(202\d)", text, re.I)
     if m_slash:
         day = int(m_slash.group(1))
         month = int(m_slash.group(2))
@@ -119,7 +131,11 @@ def sanitise_html_text(html_content):
 
     text = desc_elem.get_text("\n", strip=True)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return "\n\n".join(lines)
+    cleaned_text = "\n\n".join(lines)
+    cut_idx = cleaned_text.find("Register your interest for this PhD")
+    if cut_idx != -1:
+        cleaned_text = cleaned_text[:cut_idx].strip()
+    return cleaned_text
 
 def clean_job_title(raw_title="", link_elem=None, card=None):
     """Extracts a clean, concise project title, stripping boilerplate buttons
@@ -173,54 +189,80 @@ def clean_job_title(raw_title="", link_elem=None, card=None):
 
     return title
 
-def wait_for_cloudflare(page_obj, timeout_ms=20000):
-    title = page_obj.title().lower()
-    challenge_indicators = ["just a moment", "attention required", "checking your browser"]
-    if not any(indicator in title for indicator in challenge_indicators):
+def is_cloudflare_blocked_text(text):
+    if not text:
+        return True
+    lower = text.lower()
+    return any(
+        ind in lower
+        for ind in [
+            "just a moment",
+            "attention required",
+            "checking your browser",
+            "sorry, you have been blocked",
+            "enable javascript and cookies to continue",
+            "performing security verification",
+            "verification successful. waiting for",
+            "verifying you are human",
+            "performance and security by\n\ncloudflare",
+            "performance and security by cloudflare",
+        ]
+    )
+
+def _is_page_on_cloudflare(page_obj):
+    challenge_indicators = [
+        "just a moment",
+        "attention required",
+        "checking your browser",
+        "security verification",
+    ]
+    try:
+        curr_title = (page_obj.title() or "").strip().lower()
+    except Exception:
         return True
 
-    print("[AntiBot] Cloudflare challenge detected. Waiting for clearance...", file=sys.stderr)
+    if (
+        not curr_title
+        or curr_title in ("www.findaphd.com", "findaphd.com")
+        or any(indicator in curr_title for indicator in challenge_indicators)
+    ):
+        return True
+
+    try:
+        html = page_obj.content()
+        if isinstance(html, str) and is_cloudflare_blocked_text(html):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+def wait_for_cloudflare(page_obj, timeout_ms=45000):
+    if not _is_page_on_cloudflare(page_obj):
+        return True
+
+    print("[AntiBot] Cloudflare challenge detected. Waiting for clearance (or click the checkbox in Chrome)...", file=sys.stderr)
     start_time = time.time()
+    attempt = 0
     while time.time() - start_time < (timeout_ms / 1000):
-        curr_title = page_obj.title().lower()
-        if not any(indicator in curr_title for indicator in challenge_indicators):
+        if not _is_page_on_cloudflare(page_obj):
             print("[AntiBot] Cloudflare challenge cleared.", file=sys.stderr)
             time.sleep(2)
             return True
 
-        # Attempt to detect and click Turnstile checkbox inside frames
-        try:
-            for frame in page_obj.frames:
-                if "challenges.cloudflare.com" in frame.url:
-                    for selector in ["input[type='checkbox']", ".ctp-checkbox-label", "#challenge-stage"]:
-                        elem = frame.locator(selector)
-                        if elem.count() > 0:
-                            elem.first.click(timeout=1000)
-                            break
-        except Exception:
-            pass
-
-        # Also attempt coordinate-based click on Turnstile container if located
-        try:
-            coords = page_obj.evaluate("""() => {
-                for (const iframe of document.querySelectorAll('iframe')) {
-                    const rect = iframe.getBoundingClientRect();
-                    if (rect.width > 50 && rect.height > 30) {
-                        return { x: rect.left + 30, y: rect.top + rect.height / 2 };
-                    }
-                }
-                for (const div of document.querySelectorAll('div')) {
-                    const rect = div.getBoundingClientRect();
-                    if (rect.height >= 50 && rect.height <= 100 && rect.width >= 200 && rect.top > 0) {
-                        return { x: rect.left + 25, y: rect.top + (rect.height / 2) };
-                    }
-                }
-                return null;
-            }""")
-            if coords:
-                page_obj.mouse.click(coords["x"], coords["y"])
-        except Exception:
-            pass
+        attempt += 1
+        # Wait passively on first 2 checks so non-interactive Turnstile can auto-resolve untouched
+        if attempt >= 2:
+            try:
+                for frame in page_obj.frames:
+                    if "challenges.cloudflare.com" in frame.url:
+                        for selector in ["input[type='checkbox']", ".ctp-checkbox-label", "#challenge-stage", "body"]:
+                            elem = frame.locator(selector)
+                            if elem.count() > 0:
+                                elem.first.click(timeout=1000)
+                                break
+            except Exception:
+                pass
 
         time.sleep(1.5)
 
@@ -241,7 +283,6 @@ def scrape_findaphd(db, browser_or_context):
         context = browser_or_context
 
     page_obj = context.new_page()
-    Stealth().apply_stealth_sync(page_obj)
 
     page = 1
     seen_this_run = set()
@@ -256,7 +297,7 @@ def scrape_findaphd(db, browser_or_context):
         page_obj.wait_for_timeout(2000)
 
         # Cloudflare Turnstile challenge gate
-        cleared = wait_for_cloudflare(page_obj, timeout_ms=20000)
+        cleared = wait_for_cloudflare(page_obj, timeout_ms=45000)
         if not cleared:
             print(f"[FindAPhD] Cloudflare challenge unresolved on page {page}. Halting scraper.", file=sys.stderr)
             break
@@ -297,7 +338,13 @@ def scrape_findaphd(db, browser_or_context):
             page_job_ids.add(job_id)
             if job_id not in db:
                 new_on_page += 1
-                new_entry = {"title": title, "url": job_url, "status": "unreviewed", "description": snippet}
+                new_entry = {
+                    "title": title,
+                    "url": job_url,
+                    "status": "unreviewed",
+                    "description": snippet,
+                    "needs_full_description": True,
+                }
                 dl = parse_deadline(snippet)
                 if dl:
                     new_entry["deadline"] = dl
@@ -326,7 +373,11 @@ def scrape_findaphd(db, browser_or_context):
             print(f"[FindAPhD] Warning: Could not initialise curl_cffi session ({e}), falling back to browser.", file=sys.stderr)
 
     for job_id, job_data in db.items():
-        if job_data.get("status") == "unreviewed" and "findaphd" in job_data.get("url", "").lower():
+        needs_desc = (
+            (job_data.get("status") == "unreviewed" and job_data.get("needs_full_description", True))
+            or is_cloudflare_blocked_text(job_data.get("description", ""))
+        )
+        if "findaphd" in job_data.get("url", "").lower() and needs_desc:
             print(f"[FindAPhD] Fetching full description for {job_data['url']}...", file=sys.stderr)
             description_extracted = False
 
@@ -335,34 +386,39 @@ def scrape_findaphd(db, browser_or_context):
                 try:
                     time.sleep(random.uniform(0.5, 1.5))
                     resp = curl_session.get(job_data['url'], timeout=12)
-                    if resp.status_code == 200:
+                    if resp.status_code == 200 and not is_cloudflare_blocked_text(resp.text):
                         desc_text = sanitise_html_text(resp.text)
-                        if desc_text:
+                        if desc_text and not is_cloudflare_blocked_text(desc_text):
                             job_data['description'] = desc_text
+                            job_data['needs_full_description'] = False
                             dl = parse_deadline(desc_text)
                             if dl:
                                 job_data['deadline'] = dl
                             description_extracted = True
                             save_db(db)
+                    elif resp.status_code in (403, 503):
+                        curl_session = None
                 except Exception as e:
                     print(f"[FindAPhD] curl_cffi fetch failed ({e}), falling back to browser...", file=sys.stderr)
+                    curl_session = None
 
             # Fallback to browser navigation if curl_cffi did not extract description
             if not description_extracted:
                 try:
-                    time.sleep(random.uniform(4.0, 8.0))
+                    time.sleep(random.uniform(1.5, 3.0))
                     page_obj.goto(job_data['url'], wait_until="domcontentloaded")
-                    wait_for_cloudflare(page_obj, timeout_ms=10000)
+                    wait_for_cloudflare(page_obj, timeout_ms=20000)
                     try:
-                        page_obj.wait_for_selector(".phd-sections__description, .phd-project-description, .project-description", timeout=10000)
+                        page_obj.wait_for_selector(".phd-sections__description, .phd-project-description, .project-description, .phd-programme-description, .programme-description, .course-description, .instProgDesc", timeout=4000)
                     except Exception:
                         pass
                     page_obj.evaluate("window.scrollBy(0, 500)")
-                    time.sleep(1)
+                    time.sleep(0.5)
                     content_html = page_obj.content()
                     clean_desc = sanitise_html_text(content_html)
-                    if clean_desc and "Sorry, you have been blocked" not in clean_desc and not any(ind in clean_desc.lower() for ind in ["just a moment", "attention required"]):
+                    if clean_desc and not is_cloudflare_blocked_text(clean_desc):
                         job_data['description'] = clean_desc
+                        job_data['needs_full_description'] = False
                         dl = parse_deadline(clean_desc)
                         if dl:
                             job_data['deadline'] = dl
@@ -388,7 +444,6 @@ def scrape_jobsacuk(db, browser_or_context):
         context = browser_or_context
 
     page_obj = context.new_page()
-    Stealth().apply_stealth_sync(page_obj)
 
     start_index = 1
     new_jobs = {}
@@ -453,28 +508,20 @@ def scrape_jobsacuk(db, browser_or_context):
 
 def command_scrape():
     db = load_db()
-    user_data_dir = os.path.join(SCRIPT_DIR, ".browser_profile")
+    user_data_dir = BROWSER_PROFILE_DIR
     os.makedirs(user_data_dir, exist_ok=True)
     launch_kwargs = {
         "user_data_dir": user_data_dir,
         "headless": False,
-        "ignore_default_args": ["--enable-automation"],
-        "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        "no_viewport": True,
     }
 
     with sync_playwright() as p:
-        browser_or_context = None
-        if hasattr(p.chromium, "launch_persistent_context"):
-            try:
-                browser_or_context = p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
-            except Exception:
-                try:
-                    browser_or_context = p.chromium.launch_persistent_context(**launch_kwargs)
-                except Exception:
-                    pass
-
-        if browser_or_context is None:
-            browser_or_context = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+        try:
+            browser_or_context = p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
+        except Exception as chrome_err:
+            print(f"[Scraper] Error: Failed to launch system Google Chrome: {chrome_err}", file=sys.stderr)
+            raise
 
         scrape_findaphd(db, browser_or_context)
         scrape_jobsacuk(db, browser_or_context)
@@ -558,19 +605,17 @@ def command_clean():
             cleaned_fields += 1
             
         desc = job.get("description", "")
-        if "Select your nationality" in desc or "Afghanistan (+93)" in desc:
-            cut_idx = desc.find("Register your interest for this PhD")
-            if cut_idx != -1:
-                desc = desc[:cut_idx].strip()
-                job["description"] = desc
-                cleaned_fields += 1
+        cut_idx = desc.find("Register your interest for this PhD")
+        if cut_idx != -1:
+            desc = desc[:cut_idx].strip()
+            job["description"] = desc
+            cleaned_fields += 1
 
-        if not job.get("deadline"):
-            dl = parse_deadline(desc)
-            if dl:
-                job["deadline"] = dl
-                deadlines_found += 1
-                cleaned_fields += 1
+        dl = parse_deadline(desc)
+        if dl and job.get("deadline") != dl:
+            job["deadline"] = dl
+            deadlines_found += 1
+            cleaned_fields += 1
 
     save_db(db)
     print(f"Hygiene pass complete: cleaned {cleaned_fields} fields and identified {deadlines_found} deadlines across {len(db)} records.", file=sys.stderr)
@@ -738,6 +783,7 @@ def command_show(job_id):
 
 def main():
     parser = argparse.ArgumentParser(description="PhD Tracker CLI")
+    parser.add_argument("--data-dir", help="Directory for user_profile.md, jobs_database.json, and .browser_profile (useful for isolated E2E tests)")
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     subparsers.add_parser("scrape", help="Scrape new jobs and add to database")
@@ -770,6 +816,8 @@ def main():
     show_cmd.add_argument("job_id", help="The ID of the job to display")
 
     args = parser.parse_args()
+    if args.data_dir:
+        set_data_dir(args.data_dir)
     
     if args.command == "scrape":
         command_scrape()

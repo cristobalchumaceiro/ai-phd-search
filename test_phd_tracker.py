@@ -104,6 +104,22 @@ class TestPhDTrackerCLI(unittest.TestCase):
         # Verify browser context was closed properly
         mock_context.close.assert_called_once()
 
+    @patch('sys.stderr', new_callable=io.StringIO)
+    @patch('phd_tracker.sync_playwright')
+    def test_command_scrape_surfaces_system_chrome_error(self, mock_playwright, mock_stderr):
+        mock_p = MagicMock()
+        mock_playwright.return_value.__enter__.return_value = mock_p
+        mock_p.chromium.launch_persistent_context.side_effect = RuntimeError(
+            "Sandbox denied Mach port lookup for Google Chrome.app"
+        )
+
+        with self.assertRaises(RuntimeError) as cm:
+            phd_tracker.command_scrape()
+
+        self.assertIn("Sandbox denied Mach port lookup", str(cm.exception))
+        self.assertIn("Failed to launch system Google Chrome", mock_stderr.getvalue())
+        self.assertEqual(mock_p.chromium.launch_persistent_context.call_count, 1)
+
     def test_wait_for_cloudflare_no_challenge(self):
         mock_page = MagicMock()
         mock_page.title.return_value = "Computer Science PhD Projects"
@@ -114,8 +130,17 @@ class TestPhDTrackerCLI(unittest.TestCase):
     def test_wait_for_cloudflare_clears(self, mock_sleep):
         mock_page = MagicMock()
         mock_page.frames = []
-        # Title transitions from challenge to normal
-        mock_page.title.side_effect = ["Just a moment...", "Just a moment...", "Computer Science PhD Projects"]
+        # Title transitions from challenge to verification screen to normal
+        mock_page.title.side_effect = [
+            "Just a moment...",
+            "www.findaphd.com",
+            "Computer Science PhD Projects",
+            "Computer Science PhD Projects",
+        ]
+        mock_page.content.side_effect = [
+            "<html><body>Performing security verification. Verification successful. Waiting for www.findaphd.com to respond</body></html>",
+            "<html><body><h1>Computer Science PhD Projects</h1></body></html>",
+        ]
         result = phd_tracker.wait_for_cloudflare(mock_page, timeout_ms=3000)
         self.assertTrue(result)
 
@@ -130,8 +155,7 @@ class TestPhDTrackerCLI(unittest.TestCase):
 
     @patch('time.sleep')
     @patch('phd_tracker.get_target_url')
-    @patch('phd_tracker.Stealth')
-    def test_scrape_findaphd_multi_page(self, mock_stealth, mock_get_target_url, mock_sleep):
+    def test_scrape_findaphd_multi_page(self, mock_get_target_url, mock_sleep):
         mock_get_target_url.return_value = "https://www.findaphd.com/search"
         mock_browser = MagicMock()
         mock_page = MagicMock()
@@ -332,6 +356,16 @@ class TestPhDTrackerCLI(unittest.TestCase):
         self.assertNotIn("Afghanistan", cleaned_db["bloated_job"]["description"])
         self.assertNotIn("Select your nationality", cleaned_db["bloated_job"]["description"])
         self.assertEqual(cleaned_db["bloated_job"]["deadline"], "2026-12-15")
+
+    def test_set_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            custom_dir = os.path.join(tmp_dir, "isolated_e2e")
+            phd_tracker.set_data_dir(custom_dir)
+            self.assertEqual(phd_tracker.PROFILE_PATH, os.path.join(custom_dir, "user_profile.md"))
+            self.assertEqual(phd_tracker.DB_PATH, os.path.join(custom_dir, "jobs_database.json"))
+            self.assertEqual(phd_tracker.BROWSER_PROFILE_DIR, os.path.join(custom_dir, ".browser_profile"))
+            # Restore DB_PATH for tearDown
+            phd_tracker.DB_PATH = self.test_db_path
 
 if __name__ == '__main__':
     unittest.main()

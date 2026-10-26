@@ -67,13 +67,15 @@ The application engine provides 9 specialised subcommands. Always invoke them us
 ### 1. `/setup` — Research Profile Onboarding
 Trigger this command whenever `user_profile.md` does not exist, or when the user says *"Set up my profile"*.
 
-1. **Do not ask the user to manually edit files.**
-2. Conduct a concise conversational interview covering:
+1. **Prerequisite Check:** Ensure Google Chrome is installed on the user's machine (e.g. `/Applications/Google Chrome.app` on macOS), as `phd_tracker.py scrape` launches system Chrome (`channel="chrome"`) to clear anti-bot checks. If Chrome is missing, let the user know they need Google Chrome installed (or can run `./.venv/bin/patchright install chrome`).
+2. **Check `docs/` for Existing Background Material:** Check if the user has placed a CV, transcript, or research statement inside `docs/`. If present, read it first to pre-fill their academic background and avoid asking redundant questions.
+3. **Do not ask the user to manually edit files.**
+4. Conduct a concise conversational interview covering:
    - **Academic Background & Aspirations:** Degrees, disciplines, and career ambitions (academia, research labs, industry).
    - **Methodological Approach:** Theoretical, experimental, computational, data-driven, or qualitative.
    - **Research Themes & Exclusions:** Specific questions/topics of interest and topics strictly excluded.
    - **Hard Constraints & URLs:** Funding requirements (Home/International, stipends), geographical constraints, and target FindAPhD / jobs.ac.uk search URLs.
-3. Synthesise their responses into `user_profile.md` with URLs pinned at the top:
+5. Synthesise their responses into `user_profile.md` with URLs pinned at the top:
    `**FindAPhD_URL:** <url>` and `**JobsAcUk_URL:** <url>`.
 
 ### 2. `/find` — Discovery & Ingestion

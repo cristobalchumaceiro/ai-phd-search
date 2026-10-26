@@ -54,6 +54,10 @@ You interact with an AI assistant in chat, and the assistant runs the local Pyth
 
 ## Getting Started
 
+### Prerequisites
+* **Python 3.10+**
+* **Google Chrome**: The scraper uses your system installation of Google Chrome (`channel="chrome"`) to pass anti-bot checks on FindAPhD. Make sure Google Chrome is installed in your standard Applications folder (or run `patchright install chrome` after installing dependencies).
+
 ### 1. Installation
 Clone the repository and set up a Python virtual environment:
 
@@ -63,10 +67,11 @@ cd phd-tracker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium
 ```
 
 ### 2. Profile Setup
+*(Optional)* Drop your CV or academic transcripts into the `docs/` folder so the assistant can read your background automatically.
+
 Launch your AI assistant inside this directory and run `/setup` (or say *"Set up my PhD tracker profile"*).
 
 The assistant will ask a few questions about:
@@ -75,7 +80,7 @@ The assistant will ask a few questions about:
 * Funding requirements and location preferences
 * Search query URLs from FindAPhD or jobs.ac.uk
 
-Your preferences are saved locally to `user_profile.md`. Both `user_profile.md` and `jobs_database.json` are git-ignored to keep your data private.
+Your preferences are saved locally to `user_profile.md`. Everything in `docs/`, `user_profile.md`, and `jobs_database.json` is git-ignored to keep your data private.
 
 ---
 
