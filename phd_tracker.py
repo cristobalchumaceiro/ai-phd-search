@@ -9,6 +9,10 @@ import datetime
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_PATH = os.path.join(SCRIPT_DIR, "user_profile.md")
@@ -38,16 +42,76 @@ def get_target_url(key):
         pass
     return None
 
-def scrape_findaphd(db, browser):
+def wait_for_cloudflare(page_obj, timeout_ms=20000):
+    title = page_obj.title().lower()
+    challenge_indicators = ["just a moment", "attention required", "checking your browser"]
+    if not any(indicator in title for indicator in challenge_indicators):
+        return True
+
+    print("[AntiBot] Cloudflare challenge detected. Waiting for clearance...", file=sys.stderr)
+    start_time = time.time()
+    while time.time() - start_time < (timeout_ms / 1000):
+        curr_title = page_obj.title().lower()
+        if not any(indicator in curr_title for indicator in challenge_indicators):
+            print("[AntiBot] Cloudflare challenge cleared.", file=sys.stderr)
+            time.sleep(2)
+            return True
+
+        # Attempt to detect and click Turnstile checkbox inside frames
+        try:
+            for frame in page_obj.frames:
+                if "challenges.cloudflare.com" in frame.url:
+                    for selector in ["input[type='checkbox']", ".ctp-checkbox-label", "#challenge-stage"]:
+                        elem = frame.locator(selector)
+                        if elem.count() > 0:
+                            elem.first.click(timeout=1000)
+                            break
+        except Exception:
+            pass
+
+        # Also attempt coordinate-based click on Turnstile container if located
+        try:
+            coords = page_obj.evaluate("""() => {
+                for (const iframe of document.querySelectorAll('iframe')) {
+                    const rect = iframe.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 30) {
+                        return { x: rect.left + 30, y: rect.top + rect.height / 2 };
+                    }
+                }
+                for (const div of document.querySelectorAll('div')) {
+                    const rect = div.getBoundingClientRect();
+                    if (rect.height >= 50 && rect.height <= 100 && rect.width >= 200 && rect.top > 0) {
+                        return { x: rect.left + 25, y: rect.top + (rect.height / 2) };
+                    }
+                }
+                return null;
+            }""")
+            if coords:
+                page_obj.mouse.click(coords["x"], coords["y"])
+        except Exception:
+            pass
+
+        time.sleep(1.5)
+
+    print("[AntiBot] Warning: Cloudflare challenge did not resolve within timeout.", file=sys.stderr)
+    return False
+
+def scrape_findaphd(db, browser_or_context):
     base_url = get_target_url("FindAPhD_URL")
     if not base_url:
         print("Warning: FindAPhD_URL not found, skipping.", file=sys.stderr)
         return
-        
-    context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    owns_context = False
+    if hasattr(browser_or_context, "new_context"):
+        context = browser_or_context.new_context()
+        owns_context = True
+    else:
+        context = browser_or_context
+
     page_obj = context.new_page()
     Stealth().apply_stealth_sync(page_obj)
-    
+
     page = 1
     seen_this_run = set()
     while True:
@@ -58,7 +122,14 @@ def scrape_findaphd(db, browser):
             page_obj.wait_for_load_state("load", timeout=10000)
         except Exception:
             pass
-        page_obj.wait_for_timeout(3000)
+        page_obj.wait_for_timeout(2000)
+
+        # Cloudflare Turnstile challenge gate
+        cleared = wait_for_cloudflare(page_obj, timeout_ms=20000)
+        if not cleared:
+            print(f"[FindAPhD] Cloudflare challenge unresolved on page {page}. Halting scraper.", file=sys.stderr)
+            break
+
         html = None
         for attempt in range(3):
             try:
@@ -68,13 +139,18 @@ def scrape_findaphd(db, browser):
                 page_obj.wait_for_timeout(2000)
         if html is None:
             html = page_obj.content()
+
         soup = BeautifulSoup(html, "html.parser")
         results = soup.find_all("a", href=lambda x: x and ("/phds/project/" in x or "/phds/program" in x))
-        
+
         if not results:
-            print(f"[FindAPhD] No results found on page {page}. Stopping pagination.", file=sys.stderr)
+            page_title = page_obj.title().lower()
+            if any(ind in page_title for ind in ["just a moment", "attention required", "checking your browser"]):
+                print(f"[FindAPhD] Blocked by Cloudflare on page {page}. Stopping pagination.", file=sys.stderr)
+            else:
+                print(f"[FindAPhD] No results found on page {page}. Stopping pagination.", file=sys.stderr)
             break
-            
+
         page_job_ids = set()
         new_on_page = 0
         for link_elem in results:
@@ -86,72 +162,116 @@ def scrape_findaphd(db, browser):
             job_id = href.split("?")[-1] if "?" in href else href.strip("/")
             card = link_elem.find_parent("div", class_=lambda x: x and "row" in x)
             snippet = card.text.strip().replace("\n", " ") if card else "No snippet available."
-            
+
             page_job_ids.add(job_id)
             if job_id not in db:
                 new_on_page += 1
                 db[job_id] = {"title": title, "url": job_url, "status": "unreviewed", "description": snippet}
-                
+
         if not page_job_ids or page_job_ids.issubset(seen_this_run):
             print(f"[FindAPhD] No new listings on page {page} compared to current session. Reached end of pagination.", file=sys.stderr)
             break
-            
+
         print(f"[FindAPhD] Page {page}: {len(page_job_ids)} listings found ({new_on_page} new to database).", file=sys.stderr)
         seen_this_run.update(page_job_ids)
         page += 1
-        
+
     save_db(db)
+
+    # Initialise fast curl_cffi session with persistent browser cookies if available
+    curl_session = None
+    if cffi_requests:
+        try:
+            cookies = {c['name']: c['value'] for c in context.cookies()}
+            ua = page_obj.evaluate("navigator.userAgent")
+            curl_session = cffi_requests.Session(impersonate="chrome131")
+            curl_session.cookies.update(cookies)
+            curl_session.headers.update({"User-Agent": ua})
+        except Exception as e:
+            print(f"[FindAPhD] Warning: Could not initialise curl_cffi session ({e}), falling back to browser.", file=sys.stderr)
+
     for job_id, job_data in db.items():
         if job_data.get("status") == "unreviewed" and "findaphd" in job_data.get("url", "").lower():
             print(f"[FindAPhD] Fetching full description for {job_data['url']}...", file=sys.stderr)
-            try:
-                time.sleep(random.uniform(5.0, 12.0))
-                page_obj.goto(job_data['url'], wait_until="domcontentloaded")
-                try:
-                    page_obj.wait_for_selector(".phd-sections__description, .phd-project-description, .project-description", timeout=15000)
-                except:
-                    pass
-                page_obj.evaluate("window.scrollBy(0, 500)")
-                time.sleep(1)
-                page_obj.evaluate("window.scrollBy(0, 500)")
-                content = page_obj.evaluate("""() => {
-                    const desc = document.querySelector('.phd-sections__description') || document.querySelector('.phd-project-description') || document.querySelector('.project-description');
-                    if (desc) return desc.innerText;
-                    if (!document.body.innerText.includes("Sorry, you have been blocked")) return document.body.innerText;
-                    return "Cloudflare Blocked";
-                }""")
-                if content and content != "Cloudflare Blocked":
-                    job_data['description'] = content
-                save_db(db)
-            except Exception as e:
-                print(f"[FindAPhD] Failed to fetch {job_data['url']}: {e}", file=sys.stderr)
-    context.close()
+            description_extracted = False
 
-def scrape_jobsacuk(db, browser):
+            # Fast Description Fetching via TLS Fingerprinting (curl_cffi)
+            if curl_session:
+                try:
+                    time.sleep(random.uniform(0.5, 1.5))
+                    resp = curl_session.get(job_data['url'], timeout=12)
+                    if resp.status_code == 200:
+                        sp = BeautifulSoup(resp.text, "html.parser")
+                        desc_elem = sp.select_one(".phd-sections__description, .phd-project-description, .project-description")
+                        if desc_elem:
+                            desc_text = desc_elem.get_text("\n", strip=True)
+                            if desc_text:
+                                job_data['description'] = desc_text
+                                description_extracted = True
+                                save_db(db)
+                except Exception as e:
+                    print(f"[FindAPhD] curl_cffi fetch failed ({e}), falling back to browser...", file=sys.stderr)
+
+            # Fallback to browser navigation if curl_cffi did not extract description
+            if not description_extracted:
+                try:
+                    time.sleep(random.uniform(4.0, 8.0))
+                    page_obj.goto(job_data['url'], wait_until="domcontentloaded")
+                    wait_for_cloudflare(page_obj, timeout_ms=10000)
+                    try:
+                        page_obj.wait_for_selector(".phd-sections__description, .phd-project-description, .project-description", timeout=10000)
+                    except Exception:
+                        pass
+                    page_obj.evaluate("window.scrollBy(0, 500)")
+                    time.sleep(1)
+                    content = page_obj.evaluate("""() => {
+                        const desc = document.querySelector('.phd-sections__description') || document.querySelector('.phd-project-description') || document.querySelector('.project-description');
+                        if (desc) return desc.innerText;
+                        if (!document.body.innerText.includes("Sorry, you have been blocked") && !document.title.toLowerCase().includes("just a moment")) return document.body.innerText;
+                        return "Cloudflare Blocked";
+                    }""")
+                    if content and content != "Cloudflare Blocked":
+                        job_data['description'] = content
+                    # Retain search card snippet if blocked (do not overwrite with "Cloudflare Blocked")
+                    save_db(db)
+                except Exception as e:
+                    print(f"[FindAPhD] Failed to fetch {job_data['url']}: {e}", file=sys.stderr)
+
+    page_obj.close()
+    if owns_context:
+        context.close()
+
+def scrape_jobsacuk(db, browser_or_context):
     base_url = get_target_url("JobsAcUk_URL")
     if not base_url:
         print("Warning: JobsAcUk_URL not found, skipping.", file=sys.stderr)
         return
 
-    context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    owns_context = False
+    if hasattr(browser_or_context, "new_context"):
+        context = browser_or_context.new_context()
+        owns_context = True
+    else:
+        context = browser_or_context
+
     page_obj = context.new_page()
     Stealth().apply_stealth_sync(page_obj)
-    
+
     start_index = 1
     new_jobs = {}
     seen_this_run = set()
-    
+
     while True:
         url = base_url if start_index == 1 else f"{base_url}&pageSize=25&startIndex={start_index}"
         print(f"[JobsAcUk] Scraping search page (startIndex {start_index})...", file=sys.stderr)
         page_obj.goto(url, wait_until="domcontentloaded")
         time.sleep(random.uniform(3, 6))
-        
+
         links = page_obj.locator('a[href^="/job/"]').all()
         if not links:
             print(f"[JobsAcUk] No results found on startIndex {start_index}. Stopping pagination.", file=sys.stderr)
             break
-            
+
         page_job_ids = set()
         new_on_page = 0
         for link in links:
@@ -165,11 +285,11 @@ def scrape_jobsacuk(db, browser):
             if job_id not in new_jobs and job_id not in db:
                 new_jobs[job_id] = {"title": title, "url": full_url, "status": "unreviewed"}
                 new_on_page += 1
-                
+
         if not page_job_ids or page_job_ids.issubset(seen_this_run):
             print(f"[JobsAcUk] StartIndex {start_index} contains only previously seen listings from current session. Reached end of pagination.", file=sys.stderr)
             break
-            
+
         print(f"[JobsAcUk] StartIndex {start_index}: {len(page_job_ids)} listings found ({new_on_page} new to database).", file=sys.stderr)
         seen_this_run.update(page_job_ids)
         start_index += 25
@@ -189,15 +309,39 @@ def scrape_jobsacuk(db, browser):
         db[job_id] = job
         save_db(db)
         time.sleep(random.uniform(5, 10))
-    context.close()
+
+    page_obj.close()
+    if owns_context:
+        context.close()
 
 def command_scrape():
     db = load_db()
+    user_data_dir = os.path.join(SCRIPT_DIR, ".browser_profile")
+    os.makedirs(user_data_dir, exist_ok=True)
+    launch_kwargs = {
+        "user_data_dir": user_data_dir,
+        "headless": False,
+        "ignore_default_args": ["--enable-automation"],
+        "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+    }
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
-        scrape_findaphd(db, browser)
-        scrape_jobsacuk(db, browser)
-        browser.close()
+        browser_or_context = None
+        if hasattr(p.chromium, "launch_persistent_context"):
+            try:
+                browser_or_context = p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
+            except Exception:
+                try:
+                    browser_or_context = p.chromium.launch_persistent_context(**launch_kwargs)
+                except Exception:
+                    pass
+
+        if browser_or_context is None:
+            browser_or_context = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+
+        scrape_findaphd(db, browser_or_context)
+        scrape_jobsacuk(db, browser_or_context)
+        browser_or_context.close()
     print("Scraping complete.", file=sys.stderr)
 
 def command_extract(status, out_file):
