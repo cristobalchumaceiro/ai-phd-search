@@ -19,7 +19,7 @@ You interact with an AI assistant in chat, and the assistant runs the local Pyth
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        Agent Skills (.agents/)                         │
 │   • phd-tracker: Profile onboarding, matching, and pipeline tracking   │
-│   • phd-researcher: Project breakdown, supervisor lookup, reading lists │
+│   • phd-researcher: Project breakdown, supervisor lookup, reading lists│
 │   • portal-scraper: Scraper for university and CDT project pages       │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
