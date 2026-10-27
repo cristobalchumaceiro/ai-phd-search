@@ -1,16 +1,16 @@
 # New-User Onboarding E2E Playbook
 
-This playbook simulates a brand-new user setting up `phd-tracker` from scratch with fresh browser cookies. Run every command using `--data-dir .tmp/e2e_run` so the live workspace files (`user_profile.md`, `jobs_database.json`, and `.browser_profile`) are never modified.
+This playbook simulates a brand-new user setting up `phd-tracker` from scratch with fresh browser cookies. Run every command using `--data-dir tests/e2e/run` so the live workspace files (`user_profile.md`, `jobs_database.json`, and `.browser_profile`) are never modified.
 
 ---
 
 ## Step 0: Prepare Isolated Environment
 
-Ensure `.tmp/e2e_run` is completely empty before starting so that `.browser_profile` has zero pre-existing Cloudflare cookies.
+Ensure `tests/e2e/run` is completely empty before starting so that `.browser_profile` has zero pre-existing Cloudflare cookies.
 
 ```bash
-rm -rf .tmp/e2e_run
-mkdir -p .tmp/e2e_run
+rm -rf tests/e2e/run
+mkdir -p tests/e2e/run
 ```
 
 ---
@@ -20,7 +20,7 @@ mkdir -p .tmp/e2e_run
 **Simulated User Prompt:**
 > *"I am looking for a funded PhD in the UK researching Neuromorphic Computing and Spiking Neural Networks. I have an MSc in Computer Science and want to avoid pure wet-lab neuroscience."*
 
-Write `.tmp/e2e_run/user_profile.md` with a specific FindAPhD search URL that returns a focused set of results so the live smoke test completes quickly:
+Write `tests/e2e/run/user_profile.md` with a specific FindAPhD search URL that returns a focused set of results so the live smoke test completes quickly:
 
 ```markdown
 # PhD Search Criteria & Academic Profile
@@ -39,7 +39,7 @@ Write `.tmp/e2e_run/user_profile.md` with a specific FindAPhD search URL that re
 ```
 
 **Verification:**
-- Confirm `.tmp/e2e_run/user_profile.md` exists and contains `**FindAPhD_URL:**`.
+- Confirm `tests/e2e/run/user_profile.md` exists and contains `**FindAPhD_URL:**`.
 
 ---
 
@@ -51,14 +51,14 @@ Write `.tmp/e2e_run/user_profile.md` with a specific FindAPhD search URL that re
 Execute the scraper against the isolated data directory (always run `scrape` with `BypassSandbox: true` on macOS so Seatbelt does not block Chrome's `MachPortRendezvousServer` and trigger a `SIGTRAP` crash popup):
 
 ```bash
-./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run scrape
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run scrape
 ```
 
 **Pass Criteria:**
-1. `.browser_profile` is created fresh inside `.tmp/e2e_run/.browser_profile`.
+1. `.browser_profile` is created fresh inside `tests/e2e/run/.browser_profile`.
 2. If Cloudflare Turnstile appears, `[AntiBot] Cloudflare challenge cleared.` is logged and pagination proceeds through all search pages until `No results found on page N`.
 3. Every discovered PhD listing has its individual project URL visited (`[FindAPhD] Fetching full description for ...`).
-4. Inspect `.tmp/e2e_run/jobs_database.json`:
+4. Inspect `tests/e2e/run/jobs_database.json`:
    - At least 1 job record exists with `"status": "unreviewed"`.
    - `"needs_full_description"` is `false`.
    - `"description"` contains real project details (not `"Just a moment..."`, `"Performing security verification"`, or nationality dropdown boilerplate like `"Afghanistan (+93)"`).
@@ -73,18 +73,18 @@ Execute the scraper against the isolated data directory (always run `scrape` wit
 
 1. Extract unreviewed roles:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run extract --status unreviewed --out .tmp/e2e_run/unreviewed.json
+   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run extract --status unreviewed --out tests/e2e/run/unreviewed.json
    ```
-2. Read `.tmp/e2e_run/unreviewed.json` and evaluate each role against `.tmp/e2e_run/user_profile.md`.
-3. Write `.tmp/e2e_run/evals.json` mapping each `job_id` to `{"status": "pending" | "rejected", "reason": "..."}`.
+2. Read `tests/e2e/run/unreviewed.json` and evaluate each role against `tests/e2e/run/user_profile.md`.
+3. Write `tests/e2e/run/evals.json` mapping each `job_id` to `{"status": "pending" | "rejected", "reason": "..."}`.
 4. Apply the evaluations:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run apply .tmp/e2e_run/evals.json
+   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run apply tests/e2e/run/evals.json
    ```
 
 **Pass Criteria:**
 - `Applied N evaluations to database.` is printed.
-- `.tmp/e2e_run/evals.json` is automatically removed by `apply`.
+- `tests/e2e/run/evals.json` is automatically removed by `apply`.
 - Zero jobs remain in `unreviewed` status.
 
 ---
@@ -94,16 +94,16 @@ Execute the scraper against the isolated data directory (always run `scrape` wit
 Run the core ATS inspection and update commands to verify end-to-end state transitions:
 
 ```bash
-./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run summary
-./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run list --urgent
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run summary
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --urgent
 ```
 
 Pick one `job_id` from the list and test `show` and `update`:
 
 ```bash
-./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run show <job_id>
-./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run update <job_id> --status shortlisted --deadline "2026-12-15" --note "E2E smoke test verification"
-./.venv/bin/python phd_tracker.py --data-dir .tmp/e2e_run list --status shortlisted --urgent
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run show <job_id>
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run update <job_id> --status shortlisted --deadline "2026-12-15" --note "E2E smoke test verification"
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --status shortlisted --urgent
 ```
 
 **Pass Criteria:**
@@ -118,5 +118,5 @@ Pick one `job_id` from the list and test `show` and `update`:
 Remove the temporary E2E directory once verification passes:
 
 ```bash
-rm -rf .tmp/e2e_run
+rm -rf tests/e2e/run
 ```

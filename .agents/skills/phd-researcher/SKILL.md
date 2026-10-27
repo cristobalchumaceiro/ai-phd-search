@@ -84,9 +84,24 @@ Present the findings in a structured Markdown report:
 
 ---
 
-## Audit Logging
+## Persisting Research Findings & Audit Logging
 
-When research is performed on a tracked position, append a note to the job's timeline for traceability:
-```bash
-./.venv/bin/python phd_tracker.py update <job_id> --note "Completed academic intelligence dossier on supervisors and project literature"
-```
+To ensure intelligence gathered during research is stored permanently in the database without constructing raw SQL queries, use the native CLI subcommands:
+
+1. **Enrich Supervisor Profiles & Links:**
+   Store verified academic details, staff page URLs, and lab research notes:
+   ```bash
+   ./.venv/bin/python phd_tracker.py supervisor <job_id> --name "<Supervisor Name>" [--title "<Academic Title>"] [--institution "<Institution>"] [--department "<Department>"] [--email "<Email>"] [--url "<Profile URL>"] [--notes "<Lab Group & Publications>"]
+   ```
+
+2. **Save Project Research Notes & Append Timeline:**
+   Update project research notes and record an audit log in a single command:
+   ```bash
+   ./.venv/bin/python phd_tracker.py update <job_id> --research-notes "<Concise summary of decoded problem, methodology, and omissions>" --note "Completed academic intelligence dossier on supervisors and project literature"
+   ```
+
+3. **Query Existing Supervisor Dossiers:**
+   Cross-reference supervisors across different PhD vacancies:
+   ```bash
+   ./.venv/bin/python phd_tracker.py supervisors [--search "<Supervisor or University>"]
+   ```

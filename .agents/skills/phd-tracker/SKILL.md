@@ -15,50 +15,67 @@ The AI assistant interfaces directly with the lean, local Python engine (`phd_tr
 > [!IMPORTANT]
 > **Autonomous Execution & Anti-Permission Fatigue Directive:**
 > 1. **Pre-Approved Execution:** Any command matching `./.venv/bin/python phd_tracker.py *` is vetted, deterministic, safe, and fully pre-approved by the user. Execute these commands autonomously and proactively without prompting the user for confirmation.
-> 2. **Zero Python One-Liners:** Never write or execute ad-hoc Python one-liners (`python -c "import json; ..."`) to inspect, count, or debug the database. Always use the built-in CLI subcommands documented in the **Engine CLI Reference** below.
+> 2. **Zero Python One-Liners:** Never write or execute ad-hoc Python one-liners (`python -c "import sqlite3; ..."`) to inspect, count, or debug the database. Always use the built-in CLI subcommands documented in the **Engine CLI Reference** below.
+> 3. **Zero Raw SQL Rule:** Agents must **never** execute raw SQL queries (`sqlite3 jobs.db "..."`). All database operations (CRUD, supervisor profiles, timelines, deadlines) are strictly handled via `phd_tracker.py` subcommands.
 
 ---
 
 ## Engine CLI Reference (`phd_tracker.py`)
 
-The application engine provides 9 specialised subcommands. Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
+The application engine provides 13 specialised subcommands backed by SQLite (`jobs.db`). Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
 
 1. **`scrape`**: Runs automated stealth Playwright scrapers for configured job boards (FindAPhD, jobs.ac.uk) with automated Cloudflare clearance and TLS session caching. Newly discovered opportunities are ingested with status `unreviewed`.
    ```bash
    ./.venv/bin/python phd_tracker.py scrape
    ```
-2. **`extract`**: Extracts jobs of a specific status from the database into a temporary JSON file. Defaults to `.tmp/<status>.json`.
+2. **`extract`**: Extracts jobs of a specific status from the database into a temporary JSON file. Defaults to `tmp/<status>.json`.
    ```bash
-   ./.venv/bin/python phd_tracker.py extract --status unreviewed [--out .tmp/unreviewed.json]
+   ./.venv/bin/python phd_tracker.py extract --status unreviewed [--out tmp/unreviewed.json]
    ```
 3. **`apply`**: Updates the status and evaluation rationale for jobs from an evaluation JSON file, then automatically cleans up the temporary file.
    ```bash
-   ./.venv/bin/python phd_tracker.py apply .tmp/evaluations.json
+   ./.venv/bin/python phd_tracker.py apply tmp/evaluations.json
    ```
-4. **`update`**: Updates an individual job's ATS status, deadline, title, and/or appends a timestamped note to its audit timeline.
+4. **`update`**: Updates an individual job's ATS status, deadline, title, research notes, institution, location, and/or appends a timestamped note to its audit timeline.
    ```bash
-   ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"]
+   ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"] [--research-notes "<notes>"] [--institution "<institution>"] [--location "<location>"]
    ```
-5. **`ingest`**: Safely merges external project lists (e.g. scraped university/DLA/CDT portals) into the database with status `unreviewed` using atomic write protection.
+5. **`supervisor`**: Creates or enriches a supervisor's academic profile (deduplicated by name and institution with honorific stripping) and links them to a specific job.
+   ```bash
+   ./.venv/bin/python phd_tracker.py supervisor <job_id> --name "<name>" [--title "<academic_title>"] [--institution "<institution>"] [--department "<department>"] [--email "<email>"] [--url "<profile_url>"] [--notes "<notes>"]
+   ```
+6. **`supervisors`**: Lists or searches supervisor profiles across the database, showing linked jobs and research interests.
+   ```bash
+   ./.venv/bin/python phd_tracker.py supervisors [--search "<query>"]
+   ```
+7. **`delete`**: Deletes a job from the database (cascading to its timeline and supervisor links, while preserving reusable supervisor profiles).
+   ```bash
+   ./.venv/bin/python phd_tracker.py delete <job_id>
+   ```
+8. **`merge`**: Merges a cross-platform duplicate job into a canonical job. Combines all postings/URLs, moves supervisor links, merges timeline entries, adopts the cleaner title/institution, and retains the duplicate ID as a queryable alias in `job_postings`.
+   ```bash
+   ./.venv/bin/python phd_tracker.py merge <keep_job_id> <duplicate_job_id>
+   ```
+9. **`ingest`**: Safely merges external project lists (e.g. scraped university/DLA/CDT portals) into the database with status `unreviewed` using atomic write protection.
    ```bash
    ./.venv/bin/python phd_tracker.py ingest <path_to_json>
    ```
-6. **`summary`**: Displays a breakdown table of database counts grouped by status.
-   ```bash
-   ./.venv/bin/python phd_tracker.py summary
-   ```
-7. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--urgent` to sort by nearest application deadline.
-   ```bash
-   ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent]
-   ```
-8. **`show`**: Displays the complete record for a job: full title, URL, status, deadline, evaluation reason, supervisors, institutions, full description, and complete timeline audit history.
-   ```bash
-   ./.venv/bin/python phd_tracker.py show <job_id>
-   ```
-9. **`clean`**: Runs data hygiene across the database, stripping enquiry modal boilerplate and auto-detecting application deadlines.
-   ```bash
-   ./.venv/bin/python phd_tracker.py clean
-   ```
+10. **`summary`**: Displays a breakdown table of database counts grouped by status, supervisor profiles count, and last scrape run metadata.
+    ```bash
+    ./.venv/bin/python phd_tracker.py summary
+    ```
+11. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--urgent` to sort by nearest application deadline.
+    ```bash
+    ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent]
+    ```
+12. **`show`**: Displays the complete record for a job: full title, URL(s) and external posting links, status, deadline, evaluation reason, supervisors, institutions, research notes, full description, and complete timeline audit history.
+    ```bash
+    ./.venv/bin/python phd_tracker.py show <job_id>
+    ```
+13. **`clean`**: Runs data hygiene across the database, stripping enquiry modal boilerplate and auto-detecting application deadlines.
+    ```bash
+    ./.venv/bin/python phd_tracker.py clean
+    ```
 
 ---
 
@@ -87,19 +104,65 @@ Trigger when the user wants to check for new PhD opportunities.
 Trigger when the user wants to evaluate unreviewed opportunities against their profile.
 1. Extract unreviewed positions:
    ```bash
-   ./.venv/bin/python phd_tracker.py extract --status unreviewed --out .tmp/unreviewed.json
+   ./.venv/bin/python phd_tracker.py extract --status unreviewed --out tmp/unreviewed.json
    ```
-2. **Circuit Breaker:** If `.tmp/unreviewed.json` contains 0 jobs, notify the user: *"No new unreviewed positions found."*
-3. Read `.tmp/unreviewed.json` and `user_profile.md`.
+2. **Circuit Breaker:** If `tmp/unreviewed.json` contains 0 jobs, notify the user using the **No New Positions** output template below.
+3. Read `tmp/unreviewed.json` and `user_profile.md`.
 4. Evaluate each job against hard constraints and research fit. Categorise as:
    - `pending` (strong match with research interests and funding criteria)
    - `rejected` (fails funding, fee eligibility, or topic preferences)
    - `manual_review` (ambiguous or borderline fit)
-5. Write decisions to `.tmp/evaluations.json` and apply:
+5. Write decisions to `tmp/evaluations.json` and apply:
    ```bash
-   ./.venv/bin/python phd_tracker.py apply .tmp/evaluations.json
+   ./.venv/bin/python phd_tracker.py apply tmp/evaluations.json
    ```
-6. Present a concise match digest to the user highlighting promoted positions with reasons.
+6. Present the match digest using the **Standard Output Template** below.
+
+---
+
+### Standard Output Template (`/find` & `/match` Digest)
+
+Format `/match` and combined daily `/find` + `/match` responses using this structure:
+
+#### 1. When New Positions Are Discovered & Evaluated:
+```markdown
+### PhD Tracker Run: YYYY-MM-DD
+
+#### Run Metrics
+* **Total Scraped:** X listings across FindAPhD & jobs.ac.uk
+* **New Ingested:** Y new entries
+* **Evaluations Applied:** Z evaluated against user_profile.md
+
+#### Promoted Opportunities
+<!-- 4–6 lines per match (status: pending or manual_review) -->
+* **[<job_id>] [<Job Title>](<URL>)** — <Institution>
+  * **Supervisors:** <Names & Affiliated Centres/Labs>
+  * **Funding & Eligibility:** <Home/International status, stipend details>
+  * **Application Deadline:** <YYYY-MM-DD or Unstated>
+  * **Fit Assessment:** <1–2 sentences explaining alignment with user_profile.md>
+  * **Assigned Status:** `pending` | `manual_review`
+
+#### Active Pipeline Overview
+<!-- 1 line per active (non-rejected) position -->
+* **[<job_id>]** [<Job Title>](<URL>) — <Supervisors> (<Institution>) | `<status>` | Deadline: <YYYY-MM-DD or Unstated>
+```
+
+#### 2. When No New Positions Are Found:
+```markdown
+### PhD Tracker Run: YYYY-MM-DD
+
+#### Run Metrics
+* **Total Scraped:** X listings across FindAPhD & jobs.ac.uk
+* **New Ingested:** 0 (all current listings already in database)
+* **Status:** All feeds are up to date. No new unreviewed opportunities.
+
+#### Active Pipeline Overview
+* **[<job_id>]** [<Job Title>](<URL>) — <Supervisors> (<Institution>) | `<status>` | Deadline: <YYYY-MM-DD or Unstated>
+```
+
+**Output Formatting Rules:**
+* Keep each newly promoted opportunity to **4–6 lines** and each existing active pipeline item to **1 line**.
+* Do not repeat the full `user_profile.md` text, do not print raw JSON payloads, and do not list `rejected` positions unless explicitly asked by the user.
 
 ### 4. `/research <job_id>` — Project & Supervisor Research
 Trigger when the user requests deeper intelligence on a specific position or supervisor.

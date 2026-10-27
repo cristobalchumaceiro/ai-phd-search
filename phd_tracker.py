@@ -5,7 +5,9 @@ import sys
 import re
 import os
 import random
+import sqlite3
 import datetime
+from contextlib import contextmanager
 from bs4 import BeautifulSoup
 try:
     from patchright.sync_api import sync_playwright
@@ -18,8 +20,9 @@ except ImportError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("PHD_TRACKER_DATA_DIR") or SCRIPT_DIR
+DB_FILENAME = "jobs.db"
 PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.md")
-DB_PATH = os.path.join(DATA_DIR, "jobs_database.json")
+DB_PATH = os.path.join(DATA_DIR, DB_FILENAME)
 BROWSER_PROFILE_DIR = os.path.join(DATA_DIR, ".browser_profile")
 
 def set_data_dir(data_dir):
@@ -27,21 +30,397 @@ def set_data_dir(data_dir):
     DATA_DIR = os.path.abspath(data_dir)
     os.makedirs(DATA_DIR, exist_ok=True)
     PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.md")
-    DB_PATH = os.path.join(DATA_DIR, "jobs_database.json")
+    DB_PATH = os.path.join(DATA_DIR, DB_FILENAME)
     BROWSER_PROFILE_DIR = os.path.join(DATA_DIR, ".browser_profile")
 
-def load_db():
-    try:
-        with open(DB_PATH, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+# ---------------------------------------------------------------------------
+# SQLite storage layer (jobs.db)
+#
+# All SQL lives in this module. Agents must interact with the database only
+# through the CLI subcommands defined in main(), never through raw SQL.
+# ---------------------------------------------------------------------------
 
-def save_db(db):
-    tmp_path = DB_PATH + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(db, f, indent=2)
-    os.replace(tmp_path, DB_PATH)
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id                      TEXT PRIMARY KEY,
+    source                  TEXT NOT NULL,
+    title                   TEXT NOT NULL,
+    url                     TEXT NOT NULL,
+    institution             TEXT,
+    location                TEXT,
+    deadline                TEXT,
+    description             TEXT,
+    needs_full_description  INTEGER NOT NULL DEFAULT 0,
+    status                  TEXT NOT NULL DEFAULT 'unreviewed',
+    reason                  TEXT,
+    research_notes          TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS supervisors (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                    TEXT NOT NULL COLLATE NOCASE,
+    academic_title          TEXT,
+    email                   TEXT,
+    institution             TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+    department              TEXT,
+    profile_url             TEXT,
+    research_notes          TEXT,
+    UNIQUE(name, institution)
+);
+
+CREATE TABLE IF NOT EXISTS job_supervisors (
+    job_id                  TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    supervisor_id           INTEGER NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
+    PRIMARY KEY (job_id, supervisor_id)
+);
+
+CREATE TABLE IF NOT EXISTS timeline (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id                  TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    timestamp               TEXT NOT NULL,
+    note                    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scrape_runs (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ran_at                  TEXT NOT NULL,
+    source                  TEXT NOT NULL,
+    search_url              TEXT NOT NULL,
+    pages_scanned           INTEGER NOT NULL,
+    total_found             INTEGER NOT NULL,
+    new_jobs_added          INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_postings (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id                  TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    source                  TEXT NOT NULL,
+    external_id             TEXT NOT NULL,
+    url                     TEXT NOT NULL,
+    scraped_at              TEXT NOT NULL,
+    UNIQUE(source, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_timeline_job ON timeline(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_supervisors_sup ON job_supervisors(supervisor_id);
+CREATE INDEX IF NOT EXISTS idx_job_postings_job ON job_postings(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_postings_ext ON job_postings(external_id);
+"""
+
+JOB_COLUMNS = (
+    "source", "title", "url", "institution", "location", "deadline", "description",
+    "needs_full_description", "status", "reason", "research_notes",
+)
+SUPERVISOR_COLUMNS = ("academic_title", "email", "department", "profile_url", "research_notes")
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+def connect_db(path=None):
+    conn = sqlite3.connect(path or DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "INSERT OR IGNORE INTO job_postings (job_id, source, external_id, url, scraped_at) "
+        "SELECT id, source, id, url, created_at FROM jobs"
+    )
+    conn.commit()
+    return conn
+
+@contextmanager
+def db_session(path=None):
+    """Opens jobs.db, commits on success, rolls back on error, always closes."""
+    conn = connect_db(path)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def infer_source(job_id, url=""):
+    lower_url = (url or "").lower()
+    if "findaphd.com" in lower_url:
+        return "findaphd"
+    if "jobs.ac.uk" in lower_url:
+        return "jobsacuk"
+    prefix = job_id.split("_", 1)[0] if "_" in job_id else ""
+    return f"portal:{prefix}" if prefix else "portal"
+
+def get_canonical_job_id(conn, any_id):
+    """Resolves any job_id or external posting id to the canonical job id."""
+    if not any_id:
+        return None
+    row = conn.execute("SELECT id FROM jobs WHERE id = ?", (any_id,)).fetchone()
+    if row:
+        return row["id"]
+    row = conn.execute("SELECT job_id FROM job_postings WHERE external_id = ?", (any_id,)).fetchone()
+    if row:
+        return row["job_id"]
+    return any_id
+
+def job_exists(conn, any_id):
+    canon_id = get_canonical_job_id(conn, any_id)
+    return conn.execute("SELECT 1 FROM jobs WHERE id = ?", (canon_id,)).fetchone() is not None
+
+def insert_job(conn, job_id, title, url, source=None, description="", status="unreviewed",
+               deadline=None, needs_full_description=False, institution=None, location=None,
+               reason=None, created_at=None, updated_at=None):
+    """Inserts a job if its id is new. Also registers its primary posting in job_postings."""
+    created = created_at or now_iso()
+    src = source or infer_source(job_id, url)
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO jobs (id, source, title, url, institution, location, deadline, description, "
+        "needs_full_description, status, reason, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            job_id, src, title or "", url or "", institution, location,
+            deadline, description or "", 1 if needs_full_description else 0, status or "unreviewed",
+            reason, created, updated_at or created,
+        ),
+    )
+    if cur.rowcount == 1:
+        conn.execute(
+            "INSERT OR IGNORE INTO job_postings (job_id, source, external_id, url, scraped_at) VALUES (?, ?, ?, ?, ?)",
+            (job_id, src, job_id, url or "", created),
+        )
+        return True
+    return False
+
+def add_job_posting(conn, job_id, source, external_id, url, scraped_at=None):
+    canon_id = get_canonical_job_id(conn, job_id)
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO job_postings (job_id, source, external_id, url, scraped_at) VALUES (?, ?, ?, ?, ?)",
+        (canon_id, source, external_id, url, scraped_at or now_iso()),
+    )
+    return cur.rowcount == 1
+
+def update_job(conn, job_id, **fields):
+    """Updates whitelisted job columns and bumps updated_at. Returns True if the job exists."""
+    canon_id = get_canonical_job_id(conn, job_id)
+    fields = {k: v for k, v in fields.items() if k in JOB_COLUMNS}
+    if not fields:
+        return job_exists(conn, canon_id)
+    if "needs_full_description" in fields:
+        fields["needs_full_description"] = 1 if fields["needs_full_description"] else 0
+    assignments = ", ".join(f"{col} = ?" for col in fields)
+    cur = conn.execute(
+        f"UPDATE jobs SET {assignments}, updated_at = ? WHERE id = ?",
+        (*fields.values(), now_iso(), canon_id),
+    )
+    return cur.rowcount == 1
+
+def delete_job(conn, job_id):
+    canon_id = get_canonical_job_id(conn, job_id)
+    return conn.execute("DELETE FROM jobs WHERE id = ?", (canon_id,)).rowcount == 1
+
+def add_timeline(conn, job_id, note, timestamp=None, touch=True):
+    canon_id = get_canonical_job_id(conn, job_id)
+    ts = timestamp or now_iso()
+    conn.execute("INSERT INTO timeline (job_id, timestamp, note) VALUES (?, ?, ?)", (canon_id, ts, note))
+    if touch:
+        conn.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (now_iso(), canon_id))
+
+def get_job(conn, job_id):
+    canon_id = get_canonical_job_id(conn, job_id)
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (canon_id,)).fetchone()
+    return dict(row) if row else None
+
+def get_job_postings(conn, job_id):
+    canon_id = get_canonical_job_id(conn, job_id)
+    rows = conn.execute(
+        "SELECT source, external_id, url, scraped_at FROM job_postings WHERE job_id = ? ORDER BY id",
+        (canon_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+def get_timeline(conn, job_id):
+    canon_id = get_canonical_job_id(conn, job_id)
+    rows = conn.execute("SELECT timestamp, note FROM timeline WHERE job_id = ? ORDER BY id", (canon_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+def get_job_supervisors(conn, job_id):
+    canon_id = get_canonical_job_id(conn, job_id)
+    rows = conn.execute(
+        "SELECT s.* FROM supervisors s JOIN job_supervisors js ON js.supervisor_id = s.id "
+        "WHERE js.job_id = ? ORDER BY s.id",
+        (canon_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+def log_scrape_run(conn, source, search_url, pages_scanned, total_found, new_jobs_added):
+    conn.execute(
+        "INSERT INTO scrape_runs (ran_at, source, search_url, pages_scanned, total_found, new_jobs_added) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (now_iso(), source, search_url, pages_scanned, total_found, new_jobs_added),
+    )
+
+# --- Supervisor normalisation ------------------------------------------------
+
+HONORIFIC_RE = re.compile(r"^(?:(?:assoc(?:iate)?\.?\s+)?prof(?:essor)?\.?|dr\.?|mr\.?|mrs\.?|ms\.?|miss|d)\s+", re.I)
+
+def clean_supervisor_name(name):
+    """Strips honorifics (Dr, Prof, Assoc Prof, ...) so 'Dr A Smith' and 'A Smith' map to one profile."""
+    name = re.sub(r"\s+", " ", name or "").strip(" ,;")
+    previous = None
+    while previous != name:
+        previous = name
+        name = HONORIFIC_RE.sub("", name).strip()
+    return name
+
+def honorific_title(name):
+    lowered = (name or "").strip().lower()
+    if re.match(r"^assoc(?:iate)?\.?\s+prof", lowered):
+        return "Associate Professor"
+    if re.match(r"^prof(?:essor)?\.?\s", lowered):
+        return "Professor"
+    return None
+
+def upsert_supervisor(conn, name, institution=None, **fields):
+    """Creates or enriches a supervisor profile keyed on (name, institution). Returns the supervisor id."""
+    clean_name = clean_supervisor_name(name)
+    if not clean_name:
+        return None
+    inst = re.sub(r"\s+", " ", institution or "").strip()
+    fields = {
+        k: (v.strip() if isinstance(v, str) else v)
+        for k, v in fields.items()
+        if k in SUPERVISOR_COLUMNS and v not in (None, "")
+    }
+
+    row = conn.execute("SELECT id FROM supervisors WHERE name = ? AND institution = ?", (clean_name, inst)).fetchone()
+    if not row and inst:
+        # Upgrade a profile previously stored without an institution
+        row = conn.execute("SELECT id FROM supervisors WHERE name = ? AND institution = ''", (clean_name,)).fetchone()
+        if row:
+            conn.execute("UPDATE supervisors SET institution = ? WHERE id = ?", (inst, row["id"]))
+    if not row and not inst:
+        # Reuse an existing profile when the name is unambiguous
+        matches = conn.execute("SELECT id FROM supervisors WHERE name = ?", (clean_name,)).fetchall()
+        if len(matches) == 1:
+            row = matches[0]
+
+    if row:
+        if fields:
+            assignments = ", ".join(f"{col} = ?" for col in fields)
+            conn.execute(f"UPDATE supervisors SET {assignments} WHERE id = ?", (*fields.values(), row["id"]))
+        return row["id"]
+
+    columns = ["name", "institution", *fields.keys()]
+    placeholders = ", ".join("?" for _ in columns)
+    cur = conn.execute(
+        f"INSERT INTO supervisors ({', '.join(columns)}) VALUES ({placeholders})",
+        (clean_name, inst, *fields.values()),
+    )
+    return cur.lastrowid
+
+def link_supervisor(conn, job_id, supervisor_id):
+    canon_id = get_canonical_job_id(conn, job_id)
+    conn.execute(
+        "INSERT OR IGNORE INTO job_supervisors (job_id, supervisor_id) VALUES (?, ?)",
+        (canon_id, supervisor_id),
+    )
+
+SUPERVISOR_STRING_RE = re.compile(
+    r"\s*(?P<name>[^<(,]+?)\s*"
+    r"(?:<\s*(?P<email>[^<>]+?)\s*>)?\s*"
+    r"(?:\((?P<aff>(?:[^()]|\([^()]*\))*)\))?\s*"
+    r"(?:,|$)"
+)
+
+def _split_affiliation(aff):
+    if not aff:
+        return None, None
+    parts = aff.split(",", 1)
+    inst = parts[0].split(";")[0].strip()
+    dept = parts[1].strip() if len(parts) > 1 else None
+    return inst or None, dept or None
+
+def parse_supervisor_entries(raw, default_institution=None):
+    """Normalises supervisor data from portals/ingest files into dicts.
+
+    Accepts a list of dicts ({name, email, university|institution, department, profile_url})
+    or strings like 'Dr A Smith < a@uni.ac.uk > (Uni, Dept), B Jones < b@uni.ac.uk >'.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    entries = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = item.get("name", "")
+            if clean_supervisor_name(name):
+                entries.append({
+                    "name": name,
+                    "email": item.get("email"),
+                    "institution": item.get("institution") or item.get("university") or default_institution,
+                    "department": item.get("department"),
+                    "profile_url": item.get("profile_url") or item.get("url"),
+                    "academic_title": item.get("academic_title") or honorific_title(name),
+                })
+        elif isinstance(item, str):
+            text = item.strip()
+            pos = 0
+            while pos < len(text):
+                match = SUPERVISOR_STRING_RE.match(text, pos)
+                if not match or match.end() == pos:
+                    break
+                pos = match.end()
+                name = match.group("name")
+                if not clean_supervisor_name(name):
+                    continue
+                inst, dept = _split_affiliation(match.group("aff"))
+                entries.append({
+                    "name": name,
+                    "email": match.group("email"),
+                    "institution": inst or default_institution,
+                    "department": dept,
+                    "academic_title": honorific_title(name),
+                })
+    return entries
+
+def link_supervisors_for_job(conn, job_id, raw_supervisors, default_institution=None):
+    linked = 0
+    for entry in parse_supervisor_entries(raw_supervisors, default_institution):
+        sup_id = upsert_supervisor(
+            conn,
+            entry["name"],
+            entry.get("institution"),
+            email=entry.get("email"),
+            department=entry.get("department"),
+            profile_url=entry.get("profile_url"),
+            academic_title=entry.get("academic_title"),
+        )
+        if sup_id:
+            link_supervisor(conn, job_id, sup_id)
+            linked += 1
+    return linked
+
+def primary_institution(institutions):
+    """Returns the first institution name, stripping trailing '(Department)' qualifiers."""
+    if isinstance(institutions, str):
+        institutions = [institutions]
+    for inst in institutions or []:
+        name = re.sub(r"\s*\(.*\)\s*$", "", inst or "")
+        name = re.sub(r"\s+", " ", name).strip()
+        if name:
+            return name
+    return None
+
+def fold_description(description, training=None, trajectory=None):
+    """Folds portal-specific Training / Career Trajectory sections into the main description."""
+    parts = [(description or "").strip()]
+    if training and training.strip():
+        parts.append("Training:\n\n" + training.strip())
+    if trajectory and trajectory.strip():
+        parts.append("Career Trajectory:\n\n" + trajectory.strip())
+    return "\n\n".join(p for p in parts if p)
 
 def get_target_url(key):
     try:
@@ -269,7 +648,7 @@ def wait_for_cloudflare(page_obj, timeout_ms=45000):
     print("[AntiBot] Warning: Cloudflare challenge did not resolve within timeout.", file=sys.stderr)
     return False
 
-def scrape_findaphd(db, browser_or_context):
+def scrape_findaphd(conn, browser_or_context):
     base_url = get_target_url("FindAPhD_URL")
     if not base_url:
         print("Warning: FindAPhD_URL not found, skipping.", file=sys.stderr)
@@ -285,6 +664,8 @@ def scrape_findaphd(db, browser_or_context):
     page_obj = context.new_page()
 
     page = 1
+    pages_scanned = 0
+    new_total = 0
     seen_this_run = set()
     while True:
         url = base_url if page == 1 else f"{base_url}&PG={page}"
@@ -301,6 +682,7 @@ def scrape_findaphd(db, browser_or_context):
         if not cleared:
             print(f"[FindAPhD] Cloudflare challenge unresolved on page {page}. Halting scraper.", file=sys.stderr)
             break
+        pages_scanned += 1
 
         html = None
         for attempt in range(3):
@@ -336,19 +718,13 @@ def scrape_findaphd(db, browser_or_context):
             snippet = card.text.strip().replace("\n", " ") if card else "No snippet available."
 
             page_job_ids.add(job_id)
-            if job_id not in db:
+            if insert_job(
+                conn, job_id, title, job_url, source="findaphd", description=snippet,
+                deadline=parse_deadline(snippet), needs_full_description=True,
+            ):
                 new_on_page += 1
-                new_entry = {
-                    "title": title,
-                    "url": job_url,
-                    "status": "unreviewed",
-                    "description": snippet,
-                    "needs_full_description": True,
-                }
-                dl = parse_deadline(snippet)
-                if dl:
-                    new_entry["deadline"] = dl
-                db[job_id] = new_entry
+        conn.commit()
+        new_total += new_on_page
 
         if not page_job_ids or page_job_ids.issubset(seen_this_run):
             print(f"[FindAPhD] No new listings on page {page} compared to current session. Reached end of pagination.", file=sys.stderr)
@@ -358,7 +734,8 @@ def scrape_findaphd(db, browser_or_context):
         seen_this_run.update(page_job_ids)
         page += 1
 
-    save_db(db)
+    log_scrape_run(conn, "findaphd", base_url, pages_scanned, len(seen_this_run), new_total)
+    conn.commit()
 
     # Initialise fast curl_cffi session with persistent browser cookies if available
     curl_session = None
@@ -372,65 +749,69 @@ def scrape_findaphd(db, browser_or_context):
         except Exception as e:
             print(f"[FindAPhD] Warning: Could not initialise curl_cffi session ({e}), falling back to browser.", file=sys.stderr)
 
-    for job_id, job_data in db.items():
+    rows = conn.execute(
+        "SELECT id, url, status, description, needs_full_description FROM jobs WHERE url LIKE '%findaphd%' ORDER BY rowid"
+    ).fetchall()
+    for row in rows:
         needs_desc = (
-            (job_data.get("status") == "unreviewed" and job_data.get("needs_full_description", True))
-            or is_cloudflare_blocked_text(job_data.get("description", ""))
+            (row["status"] == "unreviewed" and row["needs_full_description"])
+            or is_cloudflare_blocked_text(row["description"] or "")
         )
-        if "findaphd" in job_data.get("url", "").lower() and needs_desc:
-            print(f"[FindAPhD] Fetching full description for {job_data['url']}...", file=sys.stderr)
-            description_extracted = False
+        if not needs_desc:
+            continue
+        job_id, job_url = row["id"], row["url"]
+        print(f"[FindAPhD] Fetching full description for {job_url}...", file=sys.stderr)
+        description_extracted = False
 
-            # Fast Description Fetching via TLS Fingerprinting (curl_cffi)
-            if curl_session:
-                try:
-                    time.sleep(random.uniform(0.5, 1.5))
-                    resp = curl_session.get(job_data['url'], timeout=12)
-                    if resp.status_code == 200 and not is_cloudflare_blocked_text(resp.text):
-                        desc_text = sanitise_html_text(resp.text)
-                        if desc_text and not is_cloudflare_blocked_text(desc_text):
-                            job_data['description'] = desc_text
-                            job_data['needs_full_description'] = False
-                            dl = parse_deadline(desc_text)
-                            if dl:
-                                job_data['deadline'] = dl
-                            description_extracted = True
-                            save_db(db)
-                    elif resp.status_code in (403, 503):
-                        curl_session = None
-                except Exception as e:
-                    print(f"[FindAPhD] curl_cffi fetch failed ({e}), falling back to browser...", file=sys.stderr)
-                    curl_session = None
-
-            # Fallback to browser navigation if curl_cffi did not extract description
-            if not description_extracted:
-                try:
-                    time.sleep(random.uniform(1.5, 3.0))
-                    page_obj.goto(job_data['url'], wait_until="domcontentloaded")
-                    wait_for_cloudflare(page_obj, timeout_ms=20000)
-                    try:
-                        page_obj.wait_for_selector(".phd-sections__description, .phd-project-description, .project-description, .phd-programme-description, .programme-description, .course-description, .instProgDesc", timeout=4000)
-                    except Exception:
-                        pass
-                    page_obj.evaluate("window.scrollBy(0, 500)")
-                    time.sleep(0.5)
-                    content_html = page_obj.content()
-                    clean_desc = sanitise_html_text(content_html)
-                    if clean_desc and not is_cloudflare_blocked_text(clean_desc):
-                        job_data['description'] = clean_desc
-                        job_data['needs_full_description'] = False
-                        dl = parse_deadline(clean_desc)
+        # Fast Description Fetching via TLS Fingerprinting (curl_cffi)
+        if curl_session:
+            try:
+                time.sleep(random.uniform(0.5, 1.5))
+                resp = curl_session.get(job_url, timeout=12)
+                if resp.status_code == 200 and not is_cloudflare_blocked_text(resp.text):
+                    desc_text = sanitise_html_text(resp.text)
+                    if desc_text and not is_cloudflare_blocked_text(desc_text):
+                        fields = {"description": desc_text, "needs_full_description": False}
+                        dl = parse_deadline(desc_text)
                         if dl:
-                            job_data['deadline'] = dl
-                    save_db(db)
-                except Exception as e:
-                    print(f"[FindAPhD] Failed to fetch {job_data['url']}: {e}", file=sys.stderr)
+                            fields["deadline"] = dl
+                        update_job(conn, job_id, **fields)
+                        conn.commit()
+                        description_extracted = True
+                elif resp.status_code in (403, 503):
+                    curl_session = None
+            except Exception as e:
+                print(f"[FindAPhD] curl_cffi fetch failed ({e}), falling back to browser...", file=sys.stderr)
+                curl_session = None
+
+        # Fallback to browser navigation if curl_cffi did not extract description
+        if not description_extracted:
+            try:
+                time.sleep(random.uniform(1.5, 3.0))
+                page_obj.goto(job_url, wait_until="domcontentloaded")
+                wait_for_cloudflare(page_obj, timeout_ms=20000)
+                try:
+                    page_obj.wait_for_selector(".phd-sections__description, .phd-project-description, .project-description, .phd-programme-description, .programme-description, .course-description, .instProgDesc", timeout=4000)
+                except Exception:
+                    pass
+                page_obj.evaluate("window.scrollBy(0, 500)")
+                time.sleep(0.5)
+                clean_desc = sanitise_html_text(page_obj.content())
+                if clean_desc and not is_cloudflare_blocked_text(clean_desc):
+                    fields = {"description": clean_desc, "needs_full_description": False}
+                    dl = parse_deadline(clean_desc)
+                    if dl:
+                        fields["deadline"] = dl
+                    update_job(conn, job_id, **fields)
+                    conn.commit()
+            except Exception as e:
+                print(f"[FindAPhD] Failed to fetch {job_url}: {e}", file=sys.stderr)
 
     page_obj.close()
     if owns_context:
         context.close()
 
-def scrape_jobsacuk(db, browser_or_context):
+def scrape_jobsacuk(conn, browser_or_context):
     base_url = get_target_url("JobsAcUk_URL")
     if not base_url:
         print("Warning: JobsAcUk_URL not found, skipping.", file=sys.stderr)
@@ -446,6 +827,7 @@ def scrape_jobsacuk(db, browser_or_context):
     page_obj = context.new_page()
 
     start_index = 1
+    pages_scanned = 0
     new_jobs = {}
     seen_this_run = set()
 
@@ -454,6 +836,7 @@ def scrape_jobsacuk(db, browser_or_context):
         print(f"[JobsAcUk] Scraping search page (startIndex {start_index})...", file=sys.stderr)
         page_obj.goto(url, wait_until="domcontentloaded")
         time.sleep(random.uniform(3, 6))
+        pages_scanned += 1
 
         links = page_obj.locator('a[href^="/job/"]').all()
         if not links:
@@ -470,8 +853,8 @@ def scrape_jobsacuk(db, browser_or_context):
             full_url = f"https://www.jobs.ac.uk{href}"
             job_id = href.split('/')[2] if len(href.split('/')) > 2 else href
             page_job_ids.add(job_id)
-            if job_id not in new_jobs and job_id not in db:
-                new_jobs[job_id] = {"title": title, "url": full_url, "status": "unreviewed"}
+            if job_id not in new_jobs and not job_exists(conn, job_id):
+                new_jobs[job_id] = {"title": title, "url": full_url}
                 new_on_page += 1
 
         if not page_job_ids or page_job_ids.issubset(seen_this_run):
@@ -484,30 +867,29 @@ def scrape_jobsacuk(db, browser_or_context):
 
     for job_id, job in new_jobs.items():
         print(f"[JobsAcUk] Fetching full description for {job['url']}...", file=sys.stderr)
+        description, deadline = "Failed to fetch.", None
         try:
             page_obj.goto(job["url"], wait_until="domcontentloaded")
             page_obj.evaluate("window.scrollBy(0, 500)")
             time.sleep(random.uniform(2, 4))
             page_obj.evaluate("window.scrollBy(0, 500)")
-            html_content = page_obj.content()
-            clean_desc = sanitise_html_text(html_content)
-            job["description"] = clean_desc if clean_desc else "Failed to extract description."
-            dl = parse_deadline(clean_desc)
-            if dl:
-                job["deadline"] = dl
+            clean_desc = sanitise_html_text(page_obj.content())
+            description = clean_desc if clean_desc else "Failed to extract description."
+            deadline = parse_deadline(clean_desc)
         except Exception as e:
             print(f"[JobsAcUk] Failed to fetch {job['url']}: {e}", file=sys.stderr)
-            job["description"] = "Failed to fetch."
-        db[job_id] = job
-        save_db(db)
+        insert_job(conn, job_id, job["title"], job["url"], source="jobsacuk", description=description, deadline=deadline)
+        conn.commit()
         time.sleep(random.uniform(5, 10))
+
+    log_scrape_run(conn, "jobsacuk", base_url, pages_scanned, len(seen_this_run), len(new_jobs))
+    conn.commit()
 
     page_obj.close()
     if owns_context:
         context.close()
 
 def command_scrape():
-    db = load_db()
     user_data_dir = BROWSER_PROFILE_DIR
     os.makedirs(user_data_dir, exist_ok=True)
     launch_kwargs = {
@@ -516,115 +898,262 @@ def command_scrape():
         "no_viewport": True,
     }
 
-    with sync_playwright() as p:
+    with db_session() as conn, sync_playwright() as p:
         try:
             browser_or_context = p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
         except Exception as chrome_err:
             print(f"[Scraper] Error: Failed to launch system Google Chrome: {chrome_err}", file=sys.stderr)
             raise
 
-        scrape_findaphd(db, browser_or_context)
-        scrape_jobsacuk(db, browser_or_context)
+        scrape_findaphd(conn, browser_or_context)
+        scrape_jobsacuk(conn, browser_or_context)
         browser_or_context.close()
     print("Scraping complete.", file=sys.stderr)
 
+def _supervisor_label(sup):
+    return sup["name"] + (f" ({sup['institution']})" if sup.get("institution") else "")
+
 def command_extract(status, out_file):
-    db = load_db()
-    extracted = {k: v for k, v in db.items() if v.get('status') == status}
+    with db_session() as conn:
+        rows = conn.execute("SELECT * FROM jobs WHERE status = ? ORDER BY rowid", (status,)).fetchall()
+        extracted = {}
+        for row in rows:
+            postings = get_job_postings(conn, row["id"])
+            urls = [p["url"] for p in postings] if postings else [row["url"]]
+            aliases = [p["external_id"] for p in postings if p["external_id"] != row["id"]]
+            record = {
+                "title": row["title"],
+                "url": row["url"],
+                "urls": urls if len(urls) > 1 else None,
+                "aliases": aliases if aliases else None,
+                "status": row["status"],
+                "source": row["source"],
+                "institution": row["institution"],
+                "location": row["location"],
+                "deadline": row["deadline"],
+                "reason": row["reason"],
+                "needs_full_description": bool(row["needs_full_description"]),
+                "supervisors": [_supervisor_label(s) for s in get_job_supervisors(conn, row["id"])],
+                "description": row["description"],
+            }
+            extracted[row["id"]] = {k: v for k, v in record.items() if v not in (None, "", [])}
     with open(out_file, 'w') as f:
         json.dump(extracted, f, indent=2)
     print(f"Extracted {len(extracted)} '{status}' jobs to {out_file}.", file=sys.stderr)
 
 def command_apply(evals_file):
-    db = load_db()
     try:
         with open(evals_file, 'r') as f:
             evals = json.load(f)
     except Exception as e:
         print(f"Error loading evals file {evals_file}: {e}", file=sys.stderr)
         sys.exit(1)
-        
+
     updated_count = 0
-    for job_id, job_eval in evals.items():
-        if job_id in db:
-            db[job_id]['status'] = job_eval.get('status', db[job_id]['status'])
-            db[job_id]['reason'] = job_eval.get('reason', db[job_id].get('reason', ''))
-            updated_count += 1
-            
-    save_db(db)
+    with db_session() as conn:
+        for job_id, job_eval in evals.items():
+            fields = {k: job_eval[k] for k in ("status", "reason") if job_eval.get(k)}
+            if job_exists(conn, job_id):
+                update_job(conn, job_id, **fields)
+                updated_count += 1
+
     print(f"Applied {updated_count} evaluations to database.", file=sys.stderr)
     try:
         os.remove(evals_file)
-        if os.path.exists(".tmp/unreviewed.json"):
-            os.remove(".tmp/unreviewed.json")
-        if os.path.exists(".tmp") and not os.listdir(".tmp"):
-            os.rmdir(".tmp")
-    except:
+        for tmp_dir in ("tmp", ".tmp"):
+            unrev_path = os.path.join(tmp_dir, "unreviewed.json")
+            if os.path.exists(unrev_path):
+                os.remove(unrev_path)
+            if os.path.exists(tmp_dir) and not os.listdir(tmp_dir):
+                os.rmdir(tmp_dir)
+    except Exception:
         pass
 
-def command_update(job_id, status=None, note=None, deadline=None, title=None):
-    if not status and not note and not deadline and not title:
-        print("Error: Must provide at least --status, --note, --deadline, or --title to update.", file=sys.stderr)
+def command_update(job_id, status=None, note=None, deadline=None, title=None,
+                   reason=None, research_notes=None, institution=None, location=None):
+    if not any([status, note, deadline, title, reason, research_notes, institution, location]):
+        print("Error: Must provide at least one of --status, --note, --deadline, --title, --reason, "
+              "--research-notes, --institution, or --location to update.", file=sys.stderr)
         sys.exit(1)
 
-    db = load_db()
-    if job_id not in db:
-        print(f"Error: Job ID '{job_id}' not found.", file=sys.stderr)
-        sys.exit(1)
-        
-    job = db[job_id]
-    
-    if status:
-        job['status'] = status
+    with db_session() as conn:
+        if not job_exists(conn, job_id):
+            print(f"Error: Job ID '{job_id}' not found.", file=sys.stderr)
+            sys.exit(1)
 
-    if title:
-        job['title'] = clean_job_title(title)
-
-    if deadline:
-        parsed_dl = parse_deadline(deadline) or deadline
-        job['deadline'] = parsed_dl
-        
-    if note:
-        job.setdefault('timeline', []).append({
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "note": note
-        })
-        
-    save_db(db)
+        fields = {}
+        if status:
+            fields["status"] = status
+        if title:
+            fields["title"] = clean_job_title(title)
+        if deadline:
+            fields["deadline"] = parse_deadline(deadline) or deadline
+        if reason:
+            fields["reason"] = reason
+        if research_notes:
+            fields["research_notes"] = research_notes
+        if institution:
+            fields["institution"] = institution
+        if location:
+            fields["location"] = location
+        update_job(conn, job_id, **fields)
+        if note:
+            add_timeline(conn, job_id, note)
     print(f"Successfully updated job '{job_id}'.", file=sys.stderr)
 
+def command_supervisor(job_id, name, academic_title=None, email=None, institution=None,
+                       department=None, profile_url=None, notes=None):
+    with db_session() as conn:
+        if not job_exists(conn, job_id):
+            print(f"Error: Job ID '{job_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+        sup_id = upsert_supervisor(
+            conn, name, institution,
+            academic_title=academic_title, email=email, department=department,
+            profile_url=profile_url, research_notes=notes,
+        )
+        if not sup_id:
+            print("Error: --name must contain a supervisor name.", file=sys.stderr)
+            sys.exit(1)
+        link_supervisor(conn, job_id, sup_id)
+    print(f"Saved supervisor '{clean_supervisor_name(name)}' (id {sup_id}) and linked to job '{job_id}'.", file=sys.stderr)
+
+def command_supervisors(search=None):
+    with db_session() as conn:
+        params = []
+        where = ""
+        if search:
+            like = f"%{search}%"
+            where = ("WHERE s.name LIKE ? OR s.institution LIKE ? OR s.department LIKE ? "
+                     "OR s.email LIKE ? OR s.research_notes LIKE ?")
+            params = [like] * 5
+        rows = conn.execute(
+            "SELECT s.*, GROUP_CONCAT(js.job_id, ', ') AS job_ids FROM supervisors s "
+            f"LEFT JOIN job_supervisors js ON js.supervisor_id = s.id {where} "
+            "GROUP BY s.id ORDER BY s.name",
+            params,
+        ).fetchall()
+
+    header = f"Supervisors matching '{search}'" if search else "All Supervisors"
+    print(f"\n=== {header} ({len(rows)} found) ===")
+    for s in rows:
+        title = f" — {s['academic_title']}" if s["academic_title"] else ""
+        affiliation = ", ".join(x for x in (s["institution"], s["department"]) if x)
+        print(f"\n[{s['id']}] {s['name']}{title}")
+        if affiliation:
+            print(f"  Affiliation: {affiliation}")
+        if s["email"]:
+            print(f"  Email: {s['email']}")
+        if s["profile_url"]:
+            print(f"  Profile: {s['profile_url']}")
+        print(f"  Jobs: {s['job_ids'] or 'none'}")
+        if s["research_notes"]:
+            notes = s["research_notes"].replace("\n", " ")
+            print(f"  Research Notes: {notes[:200]}{'...' if len(notes) > 200 else ''}")
+    print()
+
+def command_delete(job_id):
+    with db_session() as conn:
+        if not delete_job(conn, job_id):
+            print(f"Error: Job ID '{job_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+    print(f"Deleted job '{job_id}' (timeline and supervisor links removed; supervisor profiles kept).", file=sys.stderr)
+
+def command_merge(keep_id, duplicate_id):
+    with db_session() as conn:
+        k_id = get_canonical_job_id(conn, keep_id)
+        d_id = get_canonical_job_id(conn, duplicate_id)
+        if not k_id or not job_exists(conn, k_id):
+            print(f"Error: Target job '{keep_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+        if not d_id or not job_exists(conn, d_id):
+            print(f"Error: Duplicate job '{duplicate_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+        if k_id == d_id:
+            print(f"Error: '{keep_id}' and '{duplicate_id}' already resolve to the same job ('{k_id}').", file=sys.stderr)
+            sys.exit(1)
+
+        keep_job = get_job(conn, k_id)
+        dup_job = get_job(conn, d_id)
+
+        # 1. Transfer postings
+        conn.execute(
+            "INSERT OR IGNORE INTO job_postings (job_id, source, external_id, url, scraped_at) VALUES (?, ?, ?, ?, ?)",
+            (k_id, dup_job["source"], d_id, dup_job["url"], dup_job.get("created_at") or now_iso()),
+        )
+        conn.execute("UPDATE job_postings SET job_id = ? WHERE job_id = ?", (k_id, d_id))
+
+        # 2. Transfer supervisors
+        dup_sups = conn.execute("SELECT supervisor_id FROM job_supervisors WHERE job_id = ?", (d_id,)).fetchall()
+        for sup_row in dup_sups:
+            link_supervisor(conn, k_id, sup_row["supervisor_id"])
+
+        # 3. Transfer timeline entries, deduplicating identical notes
+        existing_notes = {r["note"].strip() for r in get_timeline(conn, k_id)}
+        dup_timeline = get_timeline(conn, d_id)
+        for t in dup_timeline:
+            if t["note"].strip() not in existing_notes:
+                add_timeline(conn, k_id, t["note"], timestamp=t["timestamp"], touch=False)
+                existing_notes.add(t["note"].strip())
+
+        # 4. Enrich fields on keep_job if dup_job has cleaner or more complete data
+        fields = {}
+        if len(keep_job["title"]) > 100 and len(dup_job["title"]) < len(keep_job["title"]):
+            fields["title"] = dup_job["title"]
+        if not keep_job["institution"] and dup_job["institution"]:
+            fields["institution"] = dup_job["institution"]
+        if not keep_job["location"] and dup_job["location"]:
+            fields["location"] = dup_job["location"]
+        if not keep_job["deadline"] and dup_job["deadline"]:
+            fields["deadline"] = dup_job["deadline"]
+        if not keep_job["research_notes"] and dup_job["research_notes"]:
+            fields["research_notes"] = dup_job["research_notes"]
+        if fields:
+            update_job(conn, k_id, **fields)
+
+        add_timeline(conn, k_id, f"Merged duplicate job '{d_id}' into '{k_id}'")
+
+        # 5. Delete duplicate job row
+        conn.execute("DELETE FROM jobs WHERE id = ?", (d_id,))
+
+    print(f"Successfully merged job '{duplicate_id}' into canonical job '{keep_id}'.", file=sys.stderr)
+
 def command_clean():
-    db = load_db()
     cleaned_fields = 0
     deadlines_found = 0
-    for jid, job in db.items():
-        title = job.get("title", "")
-        clean_t = clean_job_title(title)
-        if clean_t and clean_t != title:
-            job["title"] = clean_t
-            cleaned_fields += 1
-            
-        desc = job.get("description", "")
-        cut_idx = desc.find("Register your interest for this PhD")
-        if cut_idx != -1:
-            desc = desc[:cut_idx].strip()
-            job["description"] = desc
-            cleaned_fields += 1
+    with db_session() as conn:
+        rows = conn.execute("SELECT id, title, description, deadline FROM jobs").fetchall()
+        for row in rows:
+            fields = {}
+            title = row["title"] or ""
+            clean_t = clean_job_title(title)
+            if clean_t and clean_t != title:
+                fields["title"] = clean_t
+                cleaned_fields += 1
 
-        dl = parse_deadline(desc)
-        if dl and job.get("deadline") != dl:
-            job["deadline"] = dl
-            deadlines_found += 1
-            cleaned_fields += 1
+            desc = row["description"] or ""
+            cut_idx = desc.find("Register your interest for this PhD")
+            if cut_idx != -1:
+                desc = desc[:cut_idx].strip()
+                fields["description"] = desc
+                cleaned_fields += 1
 
-    save_db(db)
-    print(f"Hygiene pass complete: cleaned {cleaned_fields} fields and identified {deadlines_found} deadlines across {len(db)} records.", file=sys.stderr)
+            dl = parse_deadline(desc)
+            if dl and row["deadline"] != dl:
+                fields["deadline"] = dl
+                deadlines_found += 1
+                cleaned_fields += 1
+
+            if fields:
+                update_job(conn, row["id"], **fields)
+        total = len(rows)
+    print(f"Hygiene pass complete: cleaned {cleaned_fields} fields and identified {deadlines_found} deadlines across {total} records.", file=sys.stderr)
 
 def command_ingest(file_path):
     if not os.path.exists(file_path):
         print(f"Error: Ingest file '{file_path}' not found.", file=sys.stderr)
         sys.exit(1)
-        
+
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
@@ -644,57 +1173,61 @@ def command_ingest(file_path):
         print("Error: Ingest data must be a JSON object or array of objects.", file=sys.stderr)
         sys.exit(1)
 
-    db = load_db()
     added_count = 0
-    for job_id, job in jobs_dict.items():
-        if job_id not in db:
-            desc = job.get("description", "")
-            dl = job.get("deadline") or parse_deadline(desc)
-            db[job_id] = {
-                "title": job.get("title", ""),
-                "url": job.get("url", ""),
-                "status": "unreviewed",
-                "description": desc
-            }
-            if dl:
-                db[job_id]["deadline"] = dl
-            if "supervisors" in job:
-                db[job_id]["supervisors"] = job["supervisors"]
-            if "institutions" in job:
-                db[job_id]["institutions"] = job["institutions"]
+    with db_session() as conn:
+        for job_id, job in jobs_dict.items():
+            if job_exists(conn, job_id):
+                continue
+            desc = fold_description(job.get("description", ""), job.get("training"), job.get("trajectory"))
+            institution = job.get("institution") or primary_institution(job.get("institutions"))
+            insert_job(
+                conn, job_id, job.get("title", ""), job.get("url", ""),
+                source=job.get("source"), description=desc,
+                deadline=job.get("deadline") or parse_deadline(desc),
+                institution=institution, location=job.get("location"),
+            )
+            link_supervisors_for_job(conn, job_id, job.get("supervisors"), default_institution=institution)
             added_count += 1
-
-    save_db(db)
-    print(f"Ingested {added_count} new jobs into database (total database size: {len(db)}).", file=sys.stderr)
+        total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    print(f"Ingested {added_count} new jobs into database (total database size: {total}).", file=sys.stderr)
 
 def command_summary():
-    db = load_db()
-    counts = {}
-    for j in db.values():
-        st = j.get("status", "unspecified")
-        counts[st] = counts.get(st, 0) + 1
-        
+    with db_session() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        counts = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status ORDER BY n DESC, status"
+        ).fetchall()
+        last_run = conn.execute(
+            "SELECT ran_at, source, total_found, new_jobs_added FROM scrape_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        sup_count = conn.execute("SELECT COUNT(*) FROM supervisors").fetchone()[0]
+
     print(f"\n{'='*20} PhD Tracker Summary {'='*20}")
-    print(f"Total Jobs in Database: {len(db)}")
+    print(f"Total Jobs in Database: {total}")
+    print(f"Supervisor Profiles: {sup_count}")
+    if last_run:
+        print(f"Last Scrape: {last_run['ran_at'][:19]} ({last_run['source']}: "
+              f"{last_run['total_found']} found, {last_run['new_jobs_added']} new)")
     print(f"{'-'*55}")
-    for st, count in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
-        print(f"  • {st:<18} : {count} jobs")
+    for row in counts:
+        print(f"  • {row['status']:<18} : {row['n']} jobs")
     print(f"{'='*55}\n")
 
 def command_list(status=None, urgent=False):
-    db = load_db()
-    matches = []
-    for jid, j in db.items():
-        curr_st = j.get("status", "")
+    with db_session() as conn:
         if status:
-            if curr_st.lower() == status.lower():
-                matches.append((jid, j))
+            where, params = "WHERE LOWER(status) = LOWER(?)", [status]
         else:
-            if curr_st != "rejected":
-                matches.append((jid, j))
-
-    if urgent:
-        matches.sort(key=lambda item: (item[1].get("deadline") is None, item[1].get("deadline", "9999-99-99")))
+            where, params = "WHERE status != 'rejected'", []
+        order = "ORDER BY deadline IS NULL, deadline ASC, rowid" if urgent else "ORDER BY rowid"
+        rows = conn.execute(f"SELECT * FROM jobs {where} {order}", params).fetchall()
+        matches = []
+        for row in rows:
+            sups = get_job_supervisors(conn, row["id"])
+            latest = conn.execute(
+                "SELECT note, timestamp FROM timeline WHERE job_id = ? ORDER BY id DESC LIMIT 1", (row["id"],)
+            ).fetchone()
+            matches.append((row, sups, latest))
 
     urgent_tag = " [Sorted by Nearest Deadline]" if urgent else ""
     header = f"Jobs with Status '{status}'{urgent_tag}" if status else f"Active Tracked Jobs (Excluding Rejected){urgent_tag}"
@@ -703,105 +1236,124 @@ def command_list(status=None, urgent=False):
         print("No matching jobs found.\n")
         return
 
-    for jid, j in matches:
-        title = j.get("title", "Untitled")
-        curr_st = j.get("status", "unknown")
-        url = j.get("url", "")
-        deadline = j.get("deadline", "")
-        reason = j.get("reason", "")
-        sups = j.get("supervisors", [])
-        if isinstance(sups, list):
-            sup_str = ", ".join([s.get("name", "") + (f" ({s.get('university')})" if s.get("university") else "") for s in sups if isinstance(s, dict)])
-        else:
-            sup_str = str(sups)
-            
-        timeline = j.get("timeline", [])
-        latest_note = f"Latest Note: {timeline[-1].get('note')} ({timeline[-1].get('timestamp', '')[:10]})" if timeline else ""
-
-        print(f"\n[{jid}] {title}")
-        dl_str = f" | Deadline: {deadline}" if deadline else ""
-        print(f"  Status: {curr_st}{dl_str} | URL: {url}")
-        if sup_str:
-            print(f"  Supervisors: {sup_str}")
-        if reason:
-            print(f"  Reason: {reason}")
-        if latest_note:
-            print(f"  {latest_note}")
+    for row, sups, latest in matches:
+        print(f"\n[{row['id']}] {row['title'] or 'Untitled'}")
+        dl_str = f" | Deadline: {row['deadline']}" if row["deadline"] else ""
+        print(f"  Status: {row['status']}{dl_str} | URL: {row['url']}")
+        if sups:
+            print(f"  Supervisors: {', '.join(_supervisor_label(s) for s in sups)}")
+        if row["reason"]:
+            print(f"  Reason: {row['reason']}")
+        if latest:
+            print(f"  Latest Note: {latest['note']} ({latest['timestamp'][:10]})")
     print()
 
 def command_show(job_id):
-    db = load_db()
-    if job_id not in db:
-        print(f"Error: Job ID '{job_id}' not found in database.", file=sys.stderr)
-        sys.exit(1)
-        
-    j = db[job_id]
+    with db_session() as conn:
+        j = get_job(conn, job_id)
+        if not j:
+            print(f"Error: Job ID '{job_id}' not found in database.", file=sys.stderr)
+            sys.exit(1)
+        canon_id = j["id"]
+        postings = get_job_postings(conn, canon_id)
+        sups = get_job_supervisors(conn, canon_id)
+        timeline = get_timeline(conn, canon_id)
+
     print(f"\n{'='*70}")
-    print(f"JOB ID: {job_id}")
-    print(f"TITLE:  {j.get('title')}")
-    print(f"STATUS: {j.get('status')}")
-    if j.get("deadline"):
-        print(f"DEADLINE: {j.get('deadline')}")
-    print(f"URL:    {j.get('url')}")
-    if j.get("reason"):
-        print(f"REASON: {j.get('reason')}")
-        
-    sups = j.get("supervisors", [])
+    print(f"JOB ID: {canon_id}")
+    if job_id != canon_id:
+        print(f"ALIAS:  {job_id}")
+    print(f"TITLE:  {j['title']}")
+    print(f"STATUS: {j['status']}")
+    print(f"SOURCE: {j['source']}")
+    if j["institution"]:
+        print(f"INSTITUTION: {j['institution']}")
+    if j["location"]:
+        print(f"LOCATION: {j['location']}")
+    if j["deadline"]:
+        print(f"DEADLINE: {j['deadline']}")
+    if postings and len(postings) > 1:
+        print("\nPOSTINGS & URLS:")
+        for p in postings:
+            print(f"  • [{p['source']}] (id: {p['external_id']}) {p['url']}")
+    else:
+        print(f"URL:    {j['url']}")
+    if j["reason"]:
+        print(f"REASON: {j['reason']}")
+
     if sups:
-        print(f"\nSUPERVISORS:")
-        if isinstance(sups, list):
-            for s in sups:
-                if isinstance(s, dict):
-                    print(f"  • {s.get('name')} | Dept: {s.get('department')} | Uni: {s.get('university')} | Email: {s.get('email', 'N/A')}")
-                else:
-                    print(f"  • {s}")
-        else:
-            print(f"  {sups}")
-            
-    insts = j.get("institutions", [])
-    if insts:
-        print(f"INSTITUTIONS: {', '.join(insts) if isinstance(insts, list) else insts}")
-        
-    timeline = j.get("timeline", [])
+        print("\nSUPERVISORS:")
+        for s in sups:
+            details = [f"[{s['id']}] {s['name']}"]
+            if s["academic_title"]:
+                details.append(s["academic_title"])
+            affiliation = ", ".join(x for x in (s["institution"], s["department"]) if x)
+            if affiliation:
+                details.append(affiliation)
+            details.append(f"Email: {s['email'] or 'N/A'}")
+            print(f"  • {' | '.join(details)}")
+            if s["profile_url"]:
+                print(f"    Profile: {s['profile_url']}")
+            if s["research_notes"]:
+                print(f"    Research Notes: {s['research_notes']}")
+
     if timeline:
-        print(f"\nTIMELINE:")
+        print("\nTIMELINE:")
         for t in timeline:
-            print(f"  • [{t.get('timestamp', '')[:19]}] {t.get('note')}")
-            
-    desc = j.get("description")
-    if desc:
-        print(f"\nDESCRIPTION:\n{desc}")
-        
-    training = j.get("training")
-    if training:
-        print(f"\nTRAINING:\n{training}")
-        
-    trajectory = j.get("trajectory")
-    if trajectory:
-        print(f"\nTRAJECTORY:\n{trajectory}")
+            print(f"  • [{t['timestamp'][:19]}] {t['note']}")
+
+    if j["research_notes"]:
+        print(f"\nRESEARCH NOTES:\n{j['research_notes']}")
+
+    if j["description"]:
+        print(f"\nDESCRIPTION:\n{j['description']}")
     print(f"{'='*70}\n")
 
 def main():
     parser = argparse.ArgumentParser(description="PhD Tracker CLI")
-    parser.add_argument("--data-dir", help="Directory for user_profile.md, jobs_database.json, and .browser_profile (useful for isolated E2E tests)")
+    parser.add_argument("--data-dir", help="Directory for user_profile.md, jobs.db, and .browser_profile (useful for isolated E2E tests)")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    
+
     subparsers.add_parser("scrape", help="Scrape new jobs and add to database")
-    
+
     extract_cmd = subparsers.add_parser("extract", help="Extract jobs of a specific status to a JSON file")
     extract_cmd.add_argument("--status", required=True, help="Status to extract (e.g., unreviewed, pending, rejected)")
-    extract_cmd.add_argument("--out", help="Output file (defaults to .tmp/<status>.json)")
-    
-    apply_cmd = subparsers.add_parser("apply", help="Apply evaluations to the database")
+    extract_cmd.add_argument("--out", help="Output file (defaults to tmp/<status>.json)")
+
+    apply_cmd = subparsers.add_parser("apply", help="Apply evaluations (status + reason) to the database")
     apply_cmd.add_argument("evals_file", help="JSON file containing evaluations")
-    
-    update_cmd = subparsers.add_parser("update", help="Update a job's status and add a timeline note")
+
+    update_cmd = subparsers.add_parser("update", help="Update a job's fields and/or add a timeline note")
     update_cmd.add_argument("job_id", help="The ID of the job to update")
     update_cmd.add_argument("--status", help="New status for the job")
     update_cmd.add_argument("--note", help="Note to append to the job's timeline")
     update_cmd.add_argument("--deadline", help="Application deadline date (YYYY-MM-DD)")
     update_cmd.add_argument("--title", help="Updated clean title for the job")
-    
+    update_cmd.add_argument("--reason", help="Fit / evaluation rationale")
+    update_cmd.add_argument("--research-notes", dest="research_notes", help="Project research notes from /research (replaces existing)")
+    update_cmd.add_argument("--institution", help="Host institution")
+    update_cmd.add_argument("--location", help="City / campus")
+
+    sup_cmd = subparsers.add_parser("supervisor", help="Create or enrich a supervisor profile and link it to a job")
+    sup_cmd.add_argument("job_id", help="The ID of the job this supervisor is attached to")
+    sup_cmd.add_argument("--name", required=True, help="Supervisor name (honorifics like Dr/Prof are stripped)")
+    sup_cmd.add_argument("--title", dest="academic_title", help="Academic title, e.g. Professor, Lecturer")
+    sup_cmd.add_argument("--email", help="Email address")
+    sup_cmd.add_argument("--institution", help="University / organisation")
+    sup_cmd.add_argument("--department", help="Department / school")
+    sup_cmd.add_argument("--url", dest="profile_url", help="Staff page or Google Scholar URL")
+    sup_cmd.add_argument("--notes", help="Research interests, lab, key publications (replaces existing)")
+
+    sups_cmd = subparsers.add_parser("supervisors", help="List supervisor profiles and their linked jobs")
+    sups_cmd.add_argument("--search", help="Filter by name, institution, department, email, or notes")
+
+    delete_cmd = subparsers.add_parser("delete", help="Delete a job (cascades to its timeline and supervisor links)")
+    delete_cmd.add_argument("job_id", help="The ID of the job to delete")
+
+    merge_cmd = subparsers.add_parser("merge", help="Merge a duplicate job into a canonical job")
+    merge_cmd.add_argument("keep_id", help="Canonical job ID to keep")
+    merge_cmd.add_argument("duplicate_id", help="Duplicate job ID to merge and delete")
+
     ingest_cmd = subparsers.add_parser("ingest", help="Ingest external or portal jobs into database as unreviewed")
     ingest_cmd.add_argument("jobs_file", help="JSON file containing jobs to ingest")
 
@@ -812,17 +1364,17 @@ def main():
     list_cmd.add_argument("--status", help="Status to filter by (e.g. pending, shortlisted, applied)")
     list_cmd.add_argument("--urgent", action="store_true", help="Sort active jobs by nearest application deadline")
 
-    show_cmd = subparsers.add_parser("show", help="Show complete record and timeline for a specific job")
+    show_cmd = subparsers.add_parser("show", help="Show complete record, supervisors, and timeline for a specific job")
     show_cmd.add_argument("job_id", help="The ID of the job to display")
 
     args = parser.parse_args()
     if args.data_dir:
         set_data_dir(args.data_dir)
-    
+
     if args.command == "scrape":
         command_scrape()
     elif args.command == "extract":
-        out_file = args.out if args.out else f".tmp/{args.status}.json"
+        out_file = args.out if args.out else f"tmp/{args.status}.json"
         out_dir = os.path.dirname(out_file)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
@@ -830,7 +1382,17 @@ def main():
     elif args.command == "apply":
         command_apply(args.evals_file)
     elif args.command == "update":
-        command_update(args.job_id, args.status, args.note, args.deadline, args.title)
+        command_update(args.job_id, args.status, args.note, args.deadline, args.title,
+                       args.reason, args.research_notes, args.institution, args.location)
+    elif args.command == "supervisor":
+        command_supervisor(args.job_id, args.name, args.academic_title, args.email, args.institution,
+                           args.department, args.profile_url, args.notes)
+    elif args.command == "supervisors":
+        command_supervisors(args.search)
+    elif args.command == "delete":
+        command_delete(args.job_id)
+    elif args.command == "merge":
+        command_merge(args.keep_id, args.duplicate_id)
     elif args.command == "ingest":
         command_ingest(args.jobs_file)
     elif args.command == "summary":

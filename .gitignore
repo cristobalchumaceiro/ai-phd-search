@@ -7,19 +7,24 @@ __pycache__/
 jobs_database.json
 jobs_database*.json
 *.backup.json
+jobs.db
+jobs.db-journal
+jobs.db-wal
+jobs.db-shm
 
-# Personal documents (keep everything in docs/ private except .gitkeep)
+# Personal documents (keep personal CVs/PDFs private, allow .gitkeep)
 cv.pdf
 *.pdf
 docs/*
 !docs/.gitkeep
 
-# OS files
+# OS and temporary scratch files
 .DS_Store
 user_profile.md
+tmp/
 .tmp/
+tests/e2e/run/
 generate_report.py
 
-# Ephemeral tasks and browser cache
-tasks/
+# Browser profile cache
 .browser_profile/
