@@ -175,12 +175,14 @@ def insert_job(conn, job_id, title, url, source=None, description="", status="un
     """Inserts a job if its id is new. Also registers its primary posting in job_postings."""
     created = created_at or now_iso()
     src = source or infer_source(job_id, url)
+    clean_title = clean_job_title(title) if title else ""
+    dl = deadline or parse_deadline(description or "")
     cur = conn.execute(
         "INSERT OR IGNORE INTO jobs (id, source, title, url, institution, location, deadline, description, "
         "needs_full_description, status, reason, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            job_id, src, title or "", url or "", institution, location,
-            deadline, description or "", 1 if needs_full_description else 0, status or "unreviewed",
+            job_id, src, clean_title or title or "", url or "", institution, location,
+            dl, description or "", 1 if needs_full_description else 0, status or "unreviewed",
             reason, created, updated_at or created,
         ),
     )
@@ -1001,8 +1003,17 @@ def command_update(job_id, status=None, note=None, deadline=None, title=None,
             add_timeline(conn, job_id, note)
     print(f"Successfully updated job '{job_id}'.", file=sys.stderr)
 
-def command_supervisor(job_id, name, academic_title=None, email=None, institution=None,
-                       department=None, profile_url=None, notes=None):
+def command_supervisor(job_id=None, name=None, academic_title=None, email=None, institution=None,
+                       department=None, profile_url=None, notes=None, list_mode=False, search=None):
+    if list_mode or (not job_id and not name):
+        command_supervisors(search=search)
+        return
+    if not job_id:
+        print("Error: Must provide a job_id to link a supervisor (or use --list to list supervisors).", file=sys.stderr)
+        sys.exit(1)
+    if not name:
+        print("Error: --name must contain a supervisor name.", file=sys.stderr)
+        sys.exit(1)
     with db_session() as conn:
         if not job_exists(conn, job_id):
             print(f"Error: Job ID '{job_id}' not found.", file=sys.stderr)
@@ -1118,37 +1129,6 @@ def command_merge(keep_id, duplicate_id):
 
     print(f"Successfully merged job '{duplicate_id}' into canonical job '{keep_id}'.", file=sys.stderr)
 
-def command_clean():
-    cleaned_fields = 0
-    deadlines_found = 0
-    with db_session() as conn:
-        rows = conn.execute("SELECT id, title, description, deadline FROM jobs").fetchall()
-        for row in rows:
-            fields = {}
-            title = row["title"] or ""
-            clean_t = clean_job_title(title)
-            if clean_t and clean_t != title:
-                fields["title"] = clean_t
-                cleaned_fields += 1
-
-            desc = row["description"] or ""
-            cut_idx = desc.find("Register your interest for this PhD")
-            if cut_idx != -1:
-                desc = desc[:cut_idx].strip()
-                fields["description"] = desc
-                cleaned_fields += 1
-
-            dl = parse_deadline(desc)
-            if dl and row["deadline"] != dl:
-                fields["deadline"] = dl
-                deadlines_found += 1
-                cleaned_fields += 1
-
-            if fields:
-                update_job(conn, row["id"], **fields)
-        total = len(rows)
-    print(f"Hygiene pass complete: cleaned {cleaned_fields} fields and identified {deadlines_found} deadlines across {total} records.", file=sys.stderr)
-
 def command_ingest(file_path):
     if not os.path.exists(file_path):
         print(f"Error: Ingest file '{file_path}' not found.", file=sys.stderr)
@@ -1213,7 +1193,10 @@ def command_summary():
         print(f"  • {row['status']:<18} : {row['n']} jobs")
     print(f"{'='*55}\n")
 
-def command_list(status=None, urgent=False):
+def command_list(status=None, urgent=False, supervisors=False, search=None):
+    if supervisors:
+        command_supervisors(search=search)
+        return
     with db_session() as conn:
         if status:
             where, params = "WHERE LOWER(status) = LOWER(?)", [status]
@@ -1334,17 +1317,19 @@ def main():
     update_cmd.add_argument("--institution", help="Host institution")
     update_cmd.add_argument("--location", help="City / campus")
 
-    sup_cmd = subparsers.add_parser("supervisor", help="Create or enrich a supervisor profile and link it to a job")
-    sup_cmd.add_argument("job_id", help="The ID of the job this supervisor is attached to")
-    sup_cmd.add_argument("--name", required=True, help="Supervisor name (honorifics like Dr/Prof are stripped)")
+    sup_cmd = subparsers.add_parser("supervisor", help="Create, enrich, or list supervisor profiles")
+    sup_cmd.add_argument("job_id", nargs="?", default=None, help="The ID of the job this supervisor is attached to")
+    sup_cmd.add_argument("--name", help="Supervisor name (honorifics like Dr/Prof are stripped)")
     sup_cmd.add_argument("--title", dest="academic_title", help="Academic title, e.g. Professor, Lecturer")
     sup_cmd.add_argument("--email", help="Email address")
     sup_cmd.add_argument("--institution", help="University / organisation")
     sup_cmd.add_argument("--department", help="Department / school")
     sup_cmd.add_argument("--url", dest="profile_url", help="Staff page or Google Scholar URL")
     sup_cmd.add_argument("--notes", help="Research interests, lab, key publications (replaces existing)")
+    sup_cmd.add_argument("--list", action="store_true", help="List supervisor profiles and their linked jobs")
+    sup_cmd.add_argument("--search", help="Filter supervisors by name, institution, department, email, or notes")
 
-    sups_cmd = subparsers.add_parser("supervisors", help="List supervisor profiles and their linked jobs")
+    sups_cmd = subparsers.add_parser("supervisors", help="List supervisor profiles and their linked jobs (alias for 'list --supervisors')")
     sups_cmd.add_argument("--search", help="Filter by name, institution, department, email, or notes")
 
     delete_cmd = subparsers.add_parser("delete", help="Delete a job (cascades to its timeline and supervisor links)")
@@ -1358,11 +1343,12 @@ def main():
     ingest_cmd.add_argument("jobs_file", help="JSON file containing jobs to ingest")
 
     subparsers.add_parser("summary", help="Print summary counts of all jobs in the database by status")
-    subparsers.add_parser("clean", help="Sanitise database entries and auto-detect deadlines from descriptions")
 
     list_cmd = subparsers.add_parser("list", help="List jobs filtered by status (defaults to all non-rejected jobs)")
     list_cmd.add_argument("--status", help="Status to filter by (e.g. pending, shortlisted, applied)")
     list_cmd.add_argument("--urgent", action="store_true", help="Sort active jobs by nearest application deadline")
+    list_cmd.add_argument("--supervisors", action="store_true", help="List supervisor profiles instead of jobs")
+    list_cmd.add_argument("--search", help="Filter supervisors by query string (used with --supervisors)")
 
     show_cmd = subparsers.add_parser("show", help="Show complete record, supervisors, and timeline for a specific job")
     show_cmd.add_argument("job_id", help="The ID of the job to display")
@@ -1386,7 +1372,8 @@ def main():
                        args.reason, args.research_notes, args.institution, args.location)
     elif args.command == "supervisor":
         command_supervisor(args.job_id, args.name, args.academic_title, args.email, args.institution,
-                           args.department, args.profile_url, args.notes)
+                           args.department, args.profile_url, args.notes,
+                           list_mode=args.list, search=args.search)
     elif args.command == "supervisors":
         command_supervisors(args.search)
     elif args.command == "delete":
@@ -1397,10 +1384,8 @@ def main():
         command_ingest(args.jobs_file)
     elif args.command == "summary":
         command_summary()
-    elif args.command == "clean":
-        command_clean()
     elif args.command == "list":
-        command_list(args.status, args.urgent)
+        command_list(args.status, args.urgent, supervisors=args.supervisors, search=args.search)
     elif args.command == "show":
         command_show(args.job_id)
 

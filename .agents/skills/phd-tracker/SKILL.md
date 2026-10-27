@@ -22,7 +22,7 @@ The AI assistant interfaces directly with the lean, local Python engine (`phd_tr
 
 ## Engine CLI Reference (`phd_tracker.py`)
 
-The application engine provides 13 specialised subcommands backed by SQLite (`jobs.db`). Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
+The application engine provides 12 specialised subcommands backed by SQLite (`jobs.db`). Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
 
 1. **`scrape`**: Runs automated stealth Playwright scrapers for configured job boards (FindAPhD, jobs.ac.uk) with automated Cloudflare clearance and TLS session caching. Newly discovered opportunities are ingested with status `unreviewed`.
    ```bash
@@ -40,11 +40,15 @@ The application engine provides 13 specialised subcommands backed by SQLite (`jo
    ```bash
    ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"] [--research-notes "<notes>"] [--institution "<institution>"] [--location "<location>"]
    ```
-5. **`supervisor`**: Creates or enriches a supervisor's academic profile (deduplicated by name and institution with honorific stripping) and links them to a specific job.
+5. **`supervisor`**: Creates or enriches a supervisor's academic profile (deduplicated by name and institution with honorific stripping) and links them to a specific job. Pass `--list` (or `--search`) to view supervisors.
    ```bash
+   # Link supervisor to job
    ./.venv/bin/python phd_tracker.py supervisor <job_id> --name "<name>" [--title "<academic_title>"] [--institution "<institution>"] [--department "<department>"] [--email "<email>"] [--url "<profile_url>"] [--notes "<notes>"]
+
+   # View supervisors
+   ./.venv/bin/python phd_tracker.py supervisor --list [--search "<query>"]
    ```
-6. **`supervisors`**: Lists or searches supervisor profiles across the database, showing linked jobs and research interests.
+6. **`supervisors`**: Lists or searches supervisor profiles across the database (alias for `list --supervisors`).
    ```bash
    ./.venv/bin/python phd_tracker.py supervisors [--search "<query>"]
    ```
@@ -64,17 +68,13 @@ The application engine provides 13 specialised subcommands backed by SQLite (`jo
     ```bash
     ./.venv/bin/python phd_tracker.py summary
     ```
-11. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--urgent` to sort by nearest application deadline.
+11. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--urgent` to sort by nearest application deadline, or `--supervisors` to list supervisor profiles.
     ```bash
-    ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent]
+    ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent] [--supervisors] [--search "<query>"]
     ```
 12. **`show`**: Displays the complete record for a job: full title, URL(s) and external posting links, status, deadline, evaluation reason, supervisors, institutions, research notes, full description, and complete timeline audit history.
     ```bash
     ./.venv/bin/python phd_tracker.py show <job_id>
-    ```
-13. **`clean`**: Runs data hygiene across the database, stripping enquiry modal boilerplate and auto-detecting application deadlines.
-    ```bash
-    ./.venv/bin/python phd_tracker.py clean
     ```
 
 ---

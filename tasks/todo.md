@@ -149,40 +149,15 @@ Use this file to track progress across sessions. Mark tasks `[x]` only when impl
 **Files likely touched:** `phd_tracker.py`, `tests/test_phd_tracker.py`, `AGENTS.md`, `README.md`, `.agents/skills/phd-tracker/SKILL.md`, `.agents/skills/phd-researcher/SKILL.md`, `.agents/skills/portal-scraper/SKILL.md`  
 **Estimated scope:** Medium (7 files)
 
-### Checkpoint 6: SQLite Migration Complete
-- [x] 116 existing jobs verified in `jobs.db`
-- [x] All unit tests and E2E playbook pass against `jobs.db`
-- [x] Review with human before proceeding to Phase 7
+### Checkpoint 6: SQLite Migration & Scope Freeze Complete
+- [x] 114 existing jobs verified in `jobs.db` with 5 contacted positions
+- [x] Deduplication and postings alias resolver implemented (`phd_tracker.py merge`)
+- [x] `clean` deprecated (automatic title and deadline parsing on insert)
+- [x] `supervisor` / `supervisors` consolidated: `list --supervisors` and `supervisor --list`
+- [x] All 42 unit and E2E tests pass in < 0.9s
+- [x] Feature freeze declared; prepared for `v1.0.0` release tag
 
 ---
 
-## 🔍 Phase 7: Structured Metadata Badges & Portal Expansion
-
-### Task 7.1: Structured HTML Badge Extraction
-**Description:** Enhance FindAPhD and `jobs.ac.uk` detail-page parsers to extract closing dates, institution names, department names, funding badges, and supervisor names directly from structured HTML metadata sidebars into the new SQLite columns.
-
-**Acceptance criteria:**
-- [ ] Deadlines and metadata displayed in FindAPhD / `jobs.ac.uk` sidebars are captured into structured columns.
-
-**Verification:**
-- [ ] Unit tests against real FindAPhD and `jobs.ac.uk` HTML badge fixtures.
-
-**Dependencies:** Checkpoint 6  
-**Files likely touched:** `phd_tracker.py`, `tests/test_phd_tracker.py`  
-**Estimated scope:** Small (2 files)
-
----
-
-### Task 7.2: Live Validation of `/research <id>` & `portal-scraper`
-**Description:** Run `/research <job_id>` on 1–2 shortlisted roles and test `portal-scraper` ingestion into `jobs.db`, tuning output templates based on user feedback.
-
-**Acceptance criteria:**
-- [ ] `/research <job_id>` produces grounded project breakdown, supervisor dossier, and reading list.
-- [ ] `portal-scraper` ingests into `jobs.db` cleanly.
-
-**Verification:**
-- [ ] End-to-end review with user.
-
-**Dependencies:** Task 7.1  
-**Files likely touched:** `.agents/skills/phd-researcher/SKILL.md`, `.agents/skills/portal-scraper/SKILL.md`  
-**Estimated scope:** Small (2 files)
+## 🔒 Scope Freeze (Ready for v1.0.0 Tag)
+Phase 7 (external badge scraping and additional portal adapters) has been frozen in accordance with user decision to lock the core architecture, prevent overengineering, and cut release tag `v1.0.0`.

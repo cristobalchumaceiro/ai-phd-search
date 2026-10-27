@@ -2,7 +2,7 @@
 
 **Date:** 27 October 2026  
 **Task List Tracker:** [`tasks/todo.md`](file:///Users/cristobalchumaceirorangel/Projects/phd-tracker/tasks/todo.md)  
-**Status:** Phases 1–5 Complete | Phases 6–7 Planned (Ready for Phase 6 Schema Design)
+**Status:** Phases 1–6 Complete | Scope Frozen for v1.0.0 Release Tag
 
 ---
 

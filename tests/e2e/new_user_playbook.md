@@ -1,6 +1,6 @@
 # New-User Onboarding E2E Playbook
 
-This playbook simulates a brand-new user setting up `phd-tracker` from scratch with fresh browser cookies. Run every command using `--data-dir tests/e2e/run` so the live workspace files (`user_profile.md`, `jobs_database.json`, and `.browser_profile`) are never modified.
+This playbook simulates a brand-new user setting up `phd-tracker` from scratch with fresh browser cookies. Run every command using `--data-dir tests/e2e/run` so the live workspace files (`user_profile.md`, `jobs.db`, and `.browser_profile`) are never modified.
 
 ---
 
@@ -58,7 +58,7 @@ Execute the scraper against the isolated data directory (always run `scrape` wit
 1. `.browser_profile` is created fresh inside `tests/e2e/run/.browser_profile`.
 2. If Cloudflare Turnstile appears, `[AntiBot] Cloudflare challenge cleared.` is logged and pagination proceeds through all search pages until `No results found on page N`.
 3. Every discovered PhD listing has its individual project URL visited (`[FindAPhD] Fetching full description for ...`).
-4. Inspect `tests/e2e/run/jobs_database.json`:
+4. Inspect `tests/e2e/run/jobs.db`:
    - At least 1 job record exists with `"status": "unreviewed"`.
    - `"needs_full_description"` is `false`.
    - `"description"` contains real project details (not `"Just a moment..."`, `"Performing security verification"`, or nationality dropdown boilerplate like `"Afghanistan (+93)"`).

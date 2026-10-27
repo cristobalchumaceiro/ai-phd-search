@@ -16,7 +16,7 @@ Use this skill when the user provides an arbitrary university, research centre, 
 1. **Strictly Read-Only Scraping:** Never submit web forms, login credentials, or personal information on external sites.
 2. **Polite Rate-Limiting:** Always include randomised delays (1.2–2.5 seconds) between network requests to protect university servers.
 3. **Local Cache First:** Download raw HTML to a local cache directory (`html_cache/` or `tmp/`) so that all parsing, debugging, and quality checks run 100% locally from disk without re-hitting external servers.
-4. **Safe Database Hand-Off:** Never edit `jobs_database.json` directly. Always output a structured `tmp/portal_jobs.json` and ingest it via the safe CLI bridge.
+4. **Safe Database Hand-Off:** Never edit `jobs.db` directly. Always output a structured `tmp/portal_jobs.json` and ingest it via the safe CLI bridge.
 
 ---
 
@@ -72,7 +72,7 @@ Once verified, save the extracted projects to `tmp/portal_jobs.json` and run the
 ```bash
 ./.venv/bin/python phd_tracker.py ingest tmp/portal_jobs.json
 ```
-This safely merges the new opportunities into `jobs_database.json` with status `"unreviewed"` without risking database corruption.
+This safely merges the new opportunities into `jobs.db` with status `"unreviewed"` without risking database corruption.
 
 Finally, transition to the `phd-tracker` evaluation workflow:
 Tell the user the projects have been ingested, and ask or proceed to evaluate the new `"unreviewed"` projects against their `user_profile.md`.

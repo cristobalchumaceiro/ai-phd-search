@@ -239,6 +239,13 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertIn("UCL", output)
         self.assertIn("Expert in ML", output)
 
+        # Test list --supervisors and supervisor --list aliases
+        phd_tracker.command_list(supervisors=True, search="Jane")
+        self.assertIn("Jane Doe", mock_stdout.getvalue())
+
+        phd_tracker.command_supervisor(list_mode=True, search="UCL")
+        self.assertIn("UCL", mock_stdout.getvalue())
+
     def test_command_delete(self):
         with phd_tracker.db_session() as conn:
             phd_tracker.add_timeline(conn, "job1", "Initial contact")
@@ -503,20 +510,17 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertEqual(phd_tracker.parse_deadline("Closes: 10/02/2027"), "2027-02-10")
         self.assertIsNone(phd_tracker.parse_deadline("Contact the department for further details."))
 
-    def test_command_clean(self):
+    def test_insert_job_auto_sanitises_and_extracts_deadline(self):
         with phd_tracker.db_session() as conn:
             phd_tracker.insert_job(
                 conn,
-                "bloated_job",
+                "auto_cleaned_job",
                 "More details AI in Healthcare Read more",
-                "http://bloated",
-                description="Project about AI.\nDeadline: 2026-12-15\nRegister your interest for this PhD\nAfghanistan (+93)\nSelect your nationality",
+                "http://cleaned",
+                description="Project about AI.\nDeadline: 2026-12-15\nMore details about the project.",
             )
-        phd_tracker.command_clean()
-        job = self.job("bloated_job")
+        job = self.job("auto_cleaned_job")
         self.assertEqual(job["title"], "AI in Healthcare")
-        self.assertNotIn("Afghanistan", job["description"])
-        self.assertNotIn("Select your nationality", job["description"])
         self.assertEqual(job["deadline"], "2026-12-15")
 
     def test_set_data_dir(self):
