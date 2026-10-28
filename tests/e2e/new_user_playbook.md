@@ -66,36 +66,40 @@ Execute the scraper against the isolated data directory (always run `scrape` wit
 
 ---
 
-## Step 3: Simulate `/match` (Extract, Evaluate, and Apply)
+## Step 3: Simulate `/match` (List Unreviewed & Direct Update)
 
 **Simulated User Prompt:**
 > *"/match — evaluate the unreviewed roles against my profile."*
 
-1. Extract unreviewed roles:
+1. Inspect unreviewed roles with full descriptions directly on stdout:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run extract --status unreviewed --out tests/e2e/run/unreviewed.json
+   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --status unreviewed --full
    ```
-2. Read `tests/e2e/run/unreviewed.json` and evaluate each role against `tests/e2e/run/user_profile.md`.
-3. Write `tests/e2e/run/evals.json` mapping each `job_id` to `{"status": "pending" | "rejected", "reason": "..."}`.
-4. Apply the evaluations:
+2. Read `tests/e2e/run/user_profile.md` and evaluate each listed role against research preferences and funding criteria.
+3. Apply decisions and enrich metadata directly in the database for each role:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run apply tests/e2e/run/evals.json
+   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run update <job_id> --status <pending|rejected> --reason "<fit rationale>" [--institution "<institution>"] [--location "<location>"]
+   ```
+4. If supervisors are named in the project description, link their profiles:
+   ```bash
+   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run supervisor <job_id> --name "<name>" [--institution "<institution>"] [--title "<title>"]
    ```
 
 **Pass Criteria:**
-- `Applied N evaluations to database.` is printed.
-- `tests/e2e/run/evals.json` is automatically removed by `apply`.
-- Zero jobs remain in `unreviewed` status.
+- Each unreviewed position is evaluated and updated via `phd_tracker.py update`.
+- Named supervisors are linked via `phd_tracker.py supervisor` and deduplicated into relational supervisor profiles.
+- Zero jobs remain in `unreviewed` status (`./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --status unreviewed` outputs `0 found`).
 
 ---
 
-## Step 4: Simulate ATS Pipeline Commands (`/summary`, `/list`, `/show`, `/update`)
+## Step 4: Simulate ATS Pipeline Commands (`/summary`, `/list`, `/show`, `/update`, `supervisors`)
 
 Run the core ATS inspection and update commands to verify end-to-end state transitions:
 
 ```bash
 ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run summary
 ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --urgent
+./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run supervisors
 ```
 
 Pick one `job_id` from the list and test `show` and `update`:
@@ -107,9 +111,10 @@ Pick one `job_id` from the list and test `show` and `update`:
 ```
 
 **Pass Criteria:**
-- `summary` displays accurate counts matching the evaluated jobs.
-- `list --urgent` orders jobs with deadlines ahead of jobs without deadlines.
-- `show <job_id>` outputs the full record, deadline, timeline note, and clean description.
+- `summary` displays accurate counts matching the evaluated jobs and supervisor profiles.
+- `list --urgent` displays host institutions, locations, and orders jobs with deadlines ahead of jobs without deadlines.
+- `supervisors` lists all linked supervisor profiles and their associated jobs.
+- `show <job_id>` outputs the full record, deadline, linked supervisors, timeline note, and clean description.
 
 ---
 

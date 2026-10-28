@@ -17,30 +17,23 @@ The AI assistant interfaces directly with the lean, local Python engine (`phd_tr
 > 1. **Pre-Approved Execution:** Any command matching `./.venv/bin/python phd_tracker.py *` is vetted, deterministic, safe, and fully pre-approved by the user. Execute these commands autonomously and proactively without prompting the user for confirmation.
 > 2. **Zero Python One-Liners:** Never write or execute ad-hoc Python one-liners (`python -c "import sqlite3; ..."`) to inspect, count, or debug the database. Always use the built-in CLI subcommands documented in the **Engine CLI Reference** below.
 > 3. **Zero Raw SQL Rule:** Agents must **never** execute raw SQL queries (`sqlite3 jobs.db "..."`). All database operations (CRUD, supervisor profiles, timelines, deadlines) are strictly handled via `phd_tracker.py` subcommands.
+> 4. **Zero Temp-File / Zero Ad-Hoc Shell Diagnostics Rule:** Never create or use `tmp/` or `.tmp/` directories in the workspace for matching. All matching and evaluation inspects listings directly on `stdout` (`list --status unreviewed --full`) and updates SQLite directly via `update` and `supervisor`. Never retry local database CLI commands with `BypassSandbox: true`. Never run `ps`, `grep`, `kill`, or manual `/Applications/Google Chrome.app` shell commands to debug `scrape`.
 
 ---
 
 ## Engine CLI Reference (`phd_tracker.py`)
 
-The application engine provides 12 specialised subcommands backed by SQLite (`jobs.db`). Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
+The application engine provides 10 specialised subcommands backed by SQLite (`jobs.db`). Always invoke them using `./.venv/bin/python phd_tracker.py <command>`:
 
-1. **`scrape`**: Runs automated stealth Playwright scrapers for configured job boards (FindAPhD, jobs.ac.uk) with automated Cloudflare clearance and TLS session caching. Newly discovered opportunities are ingested with status `unreviewed`.
+1. **`scrape`**: Runs automated stealth Playwright scrapers for configured job boards (FindAPhD, jobs.ac.uk) with automated Cloudflare clearance, stale profile lock self-healing, and TLS session caching. Newly discovered opportunities are ingested with status `unreviewed`.
    ```bash
    ./.venv/bin/python phd_tracker.py scrape
    ```
-2. **`extract`**: Extracts jobs of a specific status from the database into a temporary JSON file. Defaults to `tmp/<status>.json`.
-   ```bash
-   ./.venv/bin/python phd_tracker.py extract --status unreviewed [--out tmp/unreviewed.json]
-   ```
-3. **`apply`**: Updates the status and evaluation rationale for jobs from an evaluation JSON file, then automatically cleans up the temporary file.
-   ```bash
-   ./.venv/bin/python phd_tracker.py apply tmp/evaluations.json
-   ```
-4. **`update`**: Updates an individual job's ATS status, deadline, title, research notes, institution, location, and/or appends a timestamped note to its audit timeline.
+2. **`update`**: Updates an individual job's ATS status, deadline, title, research notes, institution, location, and/or appends a timestamped note to its audit timeline.
    ```bash
    ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"] [--research-notes "<notes>"] [--institution "<institution>"] [--location "<location>"]
    ```
-5. **`supervisor`**: Creates or enriches a supervisor's academic profile (deduplicated by name and institution with honorific stripping) and links them to a specific job. Pass `--list` (or `--search`) to view supervisors.
+3. **`supervisor`**: Creates or enriches a supervisor's academic profile (deduplicated by name and institution with honorific stripping) and links them to a specific job. Pass `--list` (or `--search`) to view supervisors.
    ```bash
    # Link supervisor to job
    ./.venv/bin/python phd_tracker.py supervisor <job_id> --name "<name>" [--title "<academic_title>"] [--institution "<institution>"] [--department "<department>"] [--email "<email>"] [--url "<profile_url>"] [--notes "<notes>"]
@@ -48,38 +41,38 @@ The application engine provides 12 specialised subcommands backed by SQLite (`jo
    # View supervisors
    ./.venv/bin/python phd_tracker.py supervisor --list [--search "<query>"]
    ```
-6. **`supervisors`**: Lists or searches supervisor profiles across the database (alias for `list --supervisors`).
+4. **`supervisors`**: Lists or searches supervisor profiles across the database (alias for `list --supervisors`).
    ```bash
    ./.venv/bin/python phd_tracker.py supervisors [--search "<query>"]
    ```
-7. **`delete`**: Deletes a job from the database (cascading to its timeline and supervisor links, while preserving reusable supervisor profiles).
+5. **`delete`**: Deletes a job from the database (cascading to its timeline and supervisor links, while preserving reusable supervisor profiles).
    ```bash
    ./.venv/bin/python phd_tracker.py delete <job_id>
    ```
-8. **`merge`**: Merges a cross-platform duplicate job into a canonical job. Combines all postings/URLs, moves supervisor links, merges timeline entries, adopts the cleaner title/institution, and retains the duplicate ID as a queryable alias in `job_postings`.
+6. **`merge`**: Merges a cross-platform duplicate job into a canonical job. Combines all postings/URLs, moves supervisor links, merges timeline entries, adopts the cleaner title/institution, and retains the duplicate ID as a queryable alias in `job_postings`.
    ```bash
    ./.venv/bin/python phd_tracker.py merge <keep_job_id> <duplicate_job_id>
    ```
-9. **`ingest`**: Safely merges external project lists (e.g. scraped university/DLA/CDT portals) into the database with status `unreviewed` using atomic write protection.
+7. **`ingest`**: Safely merges external project lists (e.g. scraped university/DLA/CDT portals) into the database with status `unreviewed` using atomic write protection.
    ```bash
    ./.venv/bin/python phd_tracker.py ingest <path_to_json>
    ```
-10. **`summary`**: Displays a breakdown table of database counts grouped by status, supervisor profiles count, and last scrape run metadata.
-    ```bash
-    ./.venv/bin/python phd_tracker.py summary
-    ```
-11. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--urgent` to sort by nearest application deadline, or `--supervisors` to list supervisor profiles.
-    ```bash
-    ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent] [--supervisors] [--search "<query>"]
-    ```
-12. **`show`**: Displays the complete record for a job: full title, URL(s) and external posting links, status, deadline, evaluation reason, supervisors, institutions, research notes, full description, and complete timeline audit history.
+8. **`summary`**: Displays a breakdown table of database counts grouped by status, supervisor profiles count, and last scrape run metadata.
+   ```bash
+   ./.venv/bin/python phd_tracker.py summary
+   ```
+9. **`list`**: Lists tracked jobs in a formatted terminal view. Defaults to all active (non-rejected) jobs unless filtered. Pass `--status <status>` to filter, `--urgent` to sort by nearest application deadline, `--full` to include full descriptions and metadata, or `--supervisors` to list supervisor profiles.
+   ```bash
+   ./.venv/bin/python phd_tracker.py list [--status <status>] [--urgent] [--full] [--supervisors] [--search "<query>"]
+   ```
+10. **`show`**: Displays the complete record for a job: full title, URL(s) and external posting links, status, deadline, evaluation reason, supervisors, institutions, location, research notes, full description, and complete timeline audit history.
     ```bash
     ./.venv/bin/python phd_tracker.py show <job_id>
     ```
 
 ---
 
-## The 5-Command Lifecycle
+## Daily Lifecycle & Core Commands
 
 ### 1. `/setup` — Research Profile Onboarding
 Trigger this command whenever `user_profile.md` does not exist, or when the user says *"Set up my profile"*.
@@ -95,28 +88,27 @@ Trigger this command whenever `user_profile.md` does not exist, or when the user
 5. Synthesise their responses into `user_profile.md` with URLs pinned at the top:
    `**FindAPhD_URL:** <url>` and `**JobsAcUk_URL:** <url>`.
 
-### 2. `/find` — Discovery & Ingestion
-Trigger when the user wants to check for new PhD opportunities.
-1. Run `./.venv/bin/python phd_tracker.py scrape`.
-2. Inspect the newly scraped count and summarise newly added opportunities.
+### 2. `/find` & `/match` — Deterministic Daily Discovery & Profile Matching
+Trigger when the user wants to check for new PhD opportunities (`/find`), evaluate unreviewed listings (`/match`), or runs both together.
 
-### 3. `/match` — Profile Matching
-Trigger when the user wants to evaluate unreviewed opportunities against their profile.
-1. Extract unreviewed positions:
+Follow this exact 4-step deterministic sequence:
+
+1. **Step 1 (`scrape`):** Run `./.venv/bin/python phd_tracker.py scrape` (`BypassSandbox: true`, `WaitMsBeforeAsync: 10000`). If backgrounded, end turn and wait for task completion notification.
+2. **Step 2 (`list --status unreviewed --full`):** Run `./.venv/bin/python phd_tracker.py list --status unreviewed --full` (`BypassSandbox: false`).
+   - **Circuit Breaker:** If `0 found`, skip Step 3, run `./.venv/bin/python phd_tracker.py list --urgent` (`BypassSandbox: false`), and output the **When No New Positions Are Found** template below.
+3. **Step 3 (`update` & `supervisor` per unreviewed job):** Read `user_profile.md` once. For each unreviewed job output in Step 2, evaluate fit against `user_profile.md` and run:
    ```bash
-   ./.venv/bin/python phd_tracker.py extract --status unreviewed --out tmp/unreviewed.json
+   ./.venv/bin/python phd_tracker.py update <job_id> --status <pending|manual_review|rejected> --reason "<rationale>" [--deadline YYYY-MM-DD] [--institution "<inst>"] [--location "<loc>"]
    ```
-2. **Circuit Breaker:** If `tmp/unreviewed.json` contains 0 jobs, notify the user using the **No New Positions** output template below.
-3. Read `tmp/unreviewed.json` and `user_profile.md`.
-4. Evaluate each job against hard constraints and research fit. Categorise as:
-   - `pending` (strong match with research interests and funding criteria)
-   - `rejected` (fails funding, fee eligibility, or topic preferences)
-   - `manual_review` (ambiguous or borderline fit)
-5. Write decisions to `tmp/evaluations.json` and apply:
-   ```bash
-   ./.venv/bin/python phd_tracker.py apply tmp/evaluations.json
-   ```
-6. Present the match digest using the **Standard Output Template** below.
+   (include `--deadline`, `--institution`, or `--location` if stated in the description but missing from the header, and run `./.venv/bin/python phd_tracker.py supervisor <job_id> ...` if a supervisor is named in the advert).
+4. **Step 4 (`list --urgent` & Digest):** Run `./.venv/bin/python phd_tracker.py list --urgent` (`BypassSandbox: false`) and render the **Standard Output Template** below.
+
+> [!CAUTION]
+> **What NOT To Do During /find & /match:**
+> - Never execute `phd_tracker.py show <job_id>` for jobs already printed by `list --status unreviewed --full` or `list --urgent`. Step 2 provides full descriptions and Step 4 provides complete metadata (status, institution, location, deadline, supervisors, reason) for the pipeline summary.
+> - Never create temporary JSON files or workspace directories (`tmp/`, `.tmp/`).
+> - Never retry local database CLI commands with `BypassSandbox: true`.
+> - Never run `ps`, `grep`, `kill`, or manual `/Applications/Google Chrome.app` shell commands to debug `scrape`.
 
 ---
 
@@ -164,7 +156,7 @@ Format `/match` and combined daily `/find` + `/match` responses using this struc
 * Keep each newly promoted opportunity to **4–6 lines** and each existing active pipeline item to **1 line**.
 * Do not repeat the full `user_profile.md` text, do not print raw JSON payloads, and do not list `rejected` positions unless explicitly asked by the user.
 
-### 4. `/research <job_id>` — Project & Supervisor Research
+### 3. `/research <job_id>` — Project & Supervisor Research
 Trigger when the user requests deeper intelligence on a specific position or supervisor.
 - Hand off to the dedicated `phd-researcher` skill (`.agents/skills/phd-researcher/SKILL.md`).
 - Generates:
@@ -172,7 +164,7 @@ Trigger when the user requests deeper intelligence on a specific position or sup
   2. Supervisor & Lab Background (recent publications, grants, and research direction).
   3. Recommended Reading (2–3 relevant papers) and suggested questions to ask supervisors.
 
-### 5. `/summary` — Pipeline Overview & Deadlines
+### 4. `/summary` — Pipeline Overview & Deadlines
 Trigger when the user wants a high-level status of their applications.
 1. Run `./.venv/bin/python phd_tracker.py summary` to get exact status counts.
 2. Run `./.venv/bin/python phd_tracker.py list --urgent` to list active positions sorted by closing date.

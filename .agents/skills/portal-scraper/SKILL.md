@@ -15,8 +15,8 @@ Use this skill when the user provides an arbitrary university, research centre, 
 ## Non-Negotiable Safety Rules
 1. **Strictly Read-Only Scraping:** Never submit web forms, login credentials, or personal information on external sites.
 2. **Polite Rate-Limiting:** Always include randomised delays (1.2–2.5 seconds) between network requests to protect university servers.
-3. **Local Cache First:** Download raw HTML to a local cache directory (`html_cache/` or `tmp/`) so that all parsing, debugging, and quality checks run 100% locally from disk without re-hitting external servers.
-4. **Safe Database Hand-Off:** Never edit `jobs.db` directly. Always output a structured `tmp/portal_jobs.json` and ingest it via the safe CLI bridge.
+3. **Local Cache First:** Download raw HTML to a system temporary cache directory (`/tmp/phd_portal_cache/`) so that all parsing, debugging, and quality checks run 100% locally from disk without re-hitting external servers.
+4. **Safe Database Hand-Off:** Never edit `jobs.db` directly. Always output a structured `/tmp/portal_jobs.json` and ingest it via the safe CLI bridge.
 
 ---
 
@@ -52,7 +52,7 @@ Before running full-scale ingestion, test your extraction logic on a sample of *
 ---
 
 ### Phase 3: Resilient Batch Ingest with Local Caching
-1. Save each page's raw HTML to a local cache directory.
+1. Save each page's raw HTML to `/tmp/phd_portal_cache/`.
 2. Checkpoint each file immediately upon receipt so interrupted runs resume without re-downloading.
 3. Apply polite random delays (1.2–2.5s) between requests.
 4. Parse the cached HTML files into a single dictionary or array matching the Data Contract.
@@ -68,11 +68,11 @@ Verify the resulting dataset before committing it to the tracker:
 ---
 
 ### Phase 5: Safe Ingestion & Hand-Off to PhD Tracker
-Once verified, save the extracted projects to `tmp/portal_jobs.json` and run the atomic ingest command:
+Once verified, save the extracted projects to `/tmp/portal_jobs.json` and run the atomic ingest command:
 ```bash
-./.venv/bin/python phd_tracker.py ingest tmp/portal_jobs.json
+./.venv/bin/python phd_tracker.py ingest /tmp/portal_jobs.json
 ```
 This safely merges the new opportunities into `jobs.db` with status `"unreviewed"` without risking database corruption.
 
 Finally, transition to the `phd-tracker` evaluation workflow:
-Tell the user the projects have been ingested, and ask or proceed to evaluate the new `"unreviewed"` projects against their `user_profile.md`.
+Tell the user the projects have been ingested, and proceed to evaluate the new `"unreviewed"` projects against their `user_profile.md` using `./.venv/bin/python phd_tracker.py list --status unreviewed --full` and `./.venv/bin/python phd_tracker.py update <job_id>`.

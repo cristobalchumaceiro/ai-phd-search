@@ -448,14 +448,16 @@ def parse_deadline(text):
     if not text:
         return None
 
+    deadline_keywords = r"(?:deadline|closing date|closes|apply by|applications?\s+close|applications?\s+until|open\s+(?:for\s+applications\s+)?until)"
+
     # Pattern 1: ISO YYYY-MM-DD following deadline keywords
-    m_iso = re.search(r"(?:deadline|closing date|closes|apply by|applications close)[ \t:]+(\d{4}-\d{2}-\d{2})", text, re.I)
+    m_iso = re.search(rf"{deadline_keywords}[ \t:]+(\d{{4}}-\d{{2}}-\d{{2}})", text, re.I)
     if m_iso:
         return m_iso.group(1)
 
     # Pattern 2: DD Month YYYY on the same line after deadline keywords
     m_text = re.search(
-        r"(?:deadline|closing date|closes|apply by|applications close)[ \t:\w]*(?:on|by|at)?[ \t:]+(\d{1,2})(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)",
+        rf"{deadline_keywords}[ \t:\w]*(?:on|by|at)?[ \t:]+(\d{{1,2}})(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)",
         text,
         re.I
     )
@@ -482,7 +484,7 @@ def parse_deadline(text):
             return f"{year:04d}-{month:02d}-{day:02d}"
 
     # Pattern 3: DD/MM/YYYY
-    m_slash = re.search(r"(?:deadline|closing date|closes|apply by)[ \t:]+(\d{1,2})/(\d{1,2})/(202\d)", text, re.I)
+    m_slash = re.search(rf"{deadline_keywords}[ \t:]+(\d{{1,2}})/(\d{{1,2}})/(202\d)", text, re.I)
     if m_slash:
         day = int(m_slash.group(1))
         month = int(m_slash.group(2))
@@ -891,9 +893,36 @@ def scrape_jobsacuk(conn, browser_or_context):
     if owns_context:
         context.close()
 
+def _clean_stale_singleton_locks(profile_dir, force=False):
+    """Removes stale Chrome SingletonLock/Socket/Cookie files in profile_dir.
+    On macOS/Linux, SingletonLock is a symlink whose target ends with '-<pid>'.
+    If force=False, only removes locks when the target PID is no longer alive.
+    """
+    lock_path = os.path.join(profile_dir, "SingletonLock")
+    should_clean = force
+    if not should_clean and (os.path.islink(lock_path) or os.path.exists(lock_path)):
+        try:
+            target = os.readlink(lock_path)
+            pid_str = target.rsplit("-", 1)[-1]
+            pid = int(pid_str)
+            os.kill(pid, 0)  # Checks if process exists; raises OSError if dead
+        except (OSError, ValueError):
+            should_clean = True
+
+    if should_clean:
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            p = os.path.join(profile_dir, name)
+            if os.path.islink(p) or os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+    return should_clean
+
 def command_scrape():
     user_data_dir = BROWSER_PROFILE_DIR
     os.makedirs(user_data_dir, exist_ok=True)
+    _clean_stale_singleton_locks(user_data_dir, force=False)
     launch_kwargs = {
         "user_data_dir": user_data_dir,
         "headless": False,
@@ -904,8 +933,22 @@ def command_scrape():
         try:
             browser_or_context = p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
         except Exception as chrome_err:
-            print(f"[Scraper] Error: Failed to launch system Google Chrome: {chrome_err}", file=sys.stderr)
-            raise
+            err_msg = str(chrome_err)
+            if "Opening in existing browser session" in err_msg or "ProcessSingleton" in err_msg:
+                print(
+                    "[Scraper] Detected stale Chrome profile lock in .browser_profile; cleaning up and retrying once...",
+                    file=sys.stderr,
+                )
+                _clean_stale_singleton_locks(user_data_dir, force=True)
+                time.sleep(1)
+                try:
+                    browser_or_context = p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
+                except Exception as retry_err:
+                    print(f"[Scraper] Error: Failed to launch system Google Chrome: {retry_err}", file=sys.stderr)
+                    raise
+            else:
+                print(f"[Scraper] Error: Failed to launch system Google Chrome: {chrome_err}", file=sys.stderr)
+                raise
 
         scrape_findaphd(conn, browser_or_context)
         scrape_jobsacuk(conn, browser_or_context)
@@ -914,62 +957,6 @@ def command_scrape():
 
 def _supervisor_label(sup):
     return sup["name"] + (f" ({sup['institution']})" if sup.get("institution") else "")
-
-def command_extract(status, out_file):
-    with db_session() as conn:
-        rows = conn.execute("SELECT * FROM jobs WHERE status = ? ORDER BY rowid", (status,)).fetchall()
-        extracted = {}
-        for row in rows:
-            postings = get_job_postings(conn, row["id"])
-            urls = [p["url"] for p in postings] if postings else [row["url"]]
-            aliases = [p["external_id"] for p in postings if p["external_id"] != row["id"]]
-            record = {
-                "title": row["title"],
-                "url": row["url"],
-                "urls": urls if len(urls) > 1 else None,
-                "aliases": aliases if aliases else None,
-                "status": row["status"],
-                "source": row["source"],
-                "institution": row["institution"],
-                "location": row["location"],
-                "deadline": row["deadline"],
-                "reason": row["reason"],
-                "needs_full_description": bool(row["needs_full_description"]),
-                "supervisors": [_supervisor_label(s) for s in get_job_supervisors(conn, row["id"])],
-                "description": row["description"],
-            }
-            extracted[row["id"]] = {k: v for k, v in record.items() if v not in (None, "", [])}
-    with open(out_file, 'w') as f:
-        json.dump(extracted, f, indent=2)
-    print(f"Extracted {len(extracted)} '{status}' jobs to {out_file}.", file=sys.stderr)
-
-def command_apply(evals_file):
-    try:
-        with open(evals_file, 'r') as f:
-            evals = json.load(f)
-    except Exception as e:
-        print(f"Error loading evals file {evals_file}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    updated_count = 0
-    with db_session() as conn:
-        for job_id, job_eval in evals.items():
-            fields = {k: job_eval[k] for k in ("status", "reason") if job_eval.get(k)}
-            if job_exists(conn, job_id):
-                update_job(conn, job_id, **fields)
-                updated_count += 1
-
-    print(f"Applied {updated_count} evaluations to database.", file=sys.stderr)
-    try:
-        os.remove(evals_file)
-        for tmp_dir in ("tmp", ".tmp"):
-            unrev_path = os.path.join(tmp_dir, "unreviewed.json")
-            if os.path.exists(unrev_path):
-                os.remove(unrev_path)
-            if os.path.exists(tmp_dir) and not os.listdir(tmp_dir):
-                os.rmdir(tmp_dir)
-    except Exception:
-        pass
 
 def command_update(job_id, status=None, note=None, deadline=None, title=None,
                    reason=None, research_notes=None, institution=None, location=None):
@@ -1193,7 +1180,7 @@ def command_summary():
         print(f"  • {row['status']:<18} : {row['n']} jobs")
     print(f"{'='*55}\n")
 
-def command_list(status=None, urgent=False, supervisors=False, search=None):
+def command_list(status=None, urgent=False, supervisors=False, search=None, full=False):
     if supervisors:
         command_supervisors(search=search)
         return
@@ -1221,14 +1208,18 @@ def command_list(status=None, urgent=False, supervisors=False, search=None):
 
     for row, sups, latest in matches:
         print(f"\n[{row['id']}] {row['title'] or 'Untitled'}")
-        dl_str = f" | Deadline: {row['deadline']}" if row["deadline"] else ""
-        print(f"  Status: {row['status']}{dl_str} | URL: {row['url']}")
+        inst_str = f" | Institution: {row['institution']}" if row["institution"] else ""
+        loc_str = f" ({row['location']})" if row["location"] else ""
+        dl_str = f" | Deadline: {row['deadline']}" if row["deadline"] else " | Deadline: Unstated"
+        print(f"  Status: {row['status']}{inst_str}{loc_str}{dl_str} | URL: {row['url']}")
         if sups:
             print(f"  Supervisors: {', '.join(_supervisor_label(s) for s in sups)}")
         if row["reason"]:
             print(f"  Reason: {row['reason']}")
         if latest:
             print(f"  Latest Note: {latest['note']} ({latest['timestamp'][:10]})")
+        if full and row["description"]:
+            print(f"  Description:\n    " + "\n    ".join(row["description"].splitlines()))
     print()
 
 def command_show(job_id):
@@ -1299,13 +1290,6 @@ def main():
 
     subparsers.add_parser("scrape", help="Scrape new jobs and add to database")
 
-    extract_cmd = subparsers.add_parser("extract", help="Extract jobs of a specific status to a JSON file")
-    extract_cmd.add_argument("--status", required=True, help="Status to extract (e.g., unreviewed, pending, rejected)")
-    extract_cmd.add_argument("--out", help="Output file (defaults to tmp/<status>.json)")
-
-    apply_cmd = subparsers.add_parser("apply", help="Apply evaluations (status + reason) to the database")
-    apply_cmd.add_argument("evals_file", help="JSON file containing evaluations")
-
     update_cmd = subparsers.add_parser("update", help="Update a job's fields and/or add a timeline note")
     update_cmd.add_argument("job_id", help="The ID of the job to update")
     update_cmd.add_argument("--status", help="New status for the job")
@@ -1349,6 +1333,7 @@ def main():
     list_cmd.add_argument("--urgent", action="store_true", help="Sort active jobs by nearest application deadline")
     list_cmd.add_argument("--supervisors", action="store_true", help="List supervisor profiles instead of jobs")
     list_cmd.add_argument("--search", help="Filter supervisors by query string (used with --supervisors)")
+    list_cmd.add_argument("--full", action="store_true", help="Include full project description and complete metadata for each listed job")
 
     show_cmd = subparsers.add_parser("show", help="Show complete record, supervisors, and timeline for a specific job")
     show_cmd.add_argument("job_id", help="The ID of the job to display")
@@ -1359,14 +1344,6 @@ def main():
 
     if args.command == "scrape":
         command_scrape()
-    elif args.command == "extract":
-        out_file = args.out if args.out else f"tmp/{args.status}.json"
-        out_dir = os.path.dirname(out_file)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        command_extract(args.status, out_file)
-    elif args.command == "apply":
-        command_apply(args.evals_file)
     elif args.command == "update":
         command_update(args.job_id, args.status, args.note, args.deadline, args.title,
                        args.reason, args.research_notes, args.institution, args.location)
@@ -1385,7 +1362,7 @@ def main():
     elif args.command == "summary":
         command_summary()
     elif args.command == "list":
-        command_list(args.status, args.urgent, supervisors=args.supervisors, search=args.search)
+        command_list(args.status, args.urgent, supervisors=args.supervisors, search=args.search, full=args.full)
     elif args.command == "show":
         command_show(args.job_id)
 

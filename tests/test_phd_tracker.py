@@ -139,50 +139,37 @@ class TestSchemaAndDataLayer(TrackerTestCase):
 
 class TestPhDTrackerCLI(TrackerTestCase):
 
-    def test_command_extract(self):
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_out:
-            tmp_out_path = tmp_out.name
+    def test_clean_stale_singleton_locks_dead_pid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = os.path.join(temp_dir, "SingletonLock")
+            sock_path = os.path.join(temp_dir, "SingletonSocket")
+            cookie_path = os.path.join(temp_dir, "SingletonCookie")
 
-        try:
-            phd_tracker.command_extract("unreviewed", tmp_out_path)
-            with open(tmp_out_path, 'r') as f:
-                extracted = json.load(f)
-            self.assertEqual(len(extracted), 1)
-            self.assertIn("job1", extracted)
-            self.assertEqual(extracted["job1"]["status"], "unreviewed")
-        finally:
-            if os.path.exists(tmp_out_path):
-                os.remove(tmp_out_path)
+            os.symlink("fakehost-999999", lock_path)
+            with open(sock_path, "w") as f:
+                f.write("socket")
+            with open(cookie_path, "w") as f:
+                f.write("cookie")
 
-    def test_command_apply(self):
-        evals = {
-            "job1": {"status": "rejected", "reason": "Not a fit"}
-        }
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp_evals:
-            json.dump(evals, tmp_evals)
-            tmp_evals_path = tmp_evals.name
+            self.assertTrue(os.path.islink(lock_path))
+            self.assertTrue(os.path.exists(sock_path))
+            self.assertTrue(os.path.exists(cookie_path))
 
-        try:
-            phd_tracker.command_apply(tmp_evals_path)
-            job = self.job("job1")
-            self.assertEqual(job["status"], "rejected")
-            self.assertEqual(job["reason"], "Not a fit")
-            self.assertFalse(os.path.exists(tmp_evals_path))
-        finally:
-            if os.path.exists(tmp_evals_path):
-                os.remove(tmp_evals_path)
+            cleaned = phd_tracker._clean_stale_singleton_locks(temp_dir, force=False)
+            self.assertTrue(cleaned)
+            self.assertFalse(os.path.exists(lock_path))
+            self.assertFalse(os.path.exists(sock_path))
+            self.assertFalse(os.path.exists(cookie_path))
 
-    def test_command_apply_empty_evals(self):
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp_evals:
-            json.dump({}, tmp_evals)
-            tmp_evals_path = tmp_evals.name
-
-        try:
-            phd_tracker.command_apply(tmp_evals_path)
-            self.assertFalse(os.path.exists(tmp_evals_path))
-        finally:
-            if os.path.exists(tmp_evals_path):
-                os.remove(tmp_evals_path)
+            # When force=True, cleans without needing dead pid symlink
+            with open(lock_path, "w") as f:
+                f.write("lock")
+            with open(sock_path, "w") as f:
+                f.write("socket")
+            cleaned_force = phd_tracker._clean_stale_singleton_locks(temp_dir, force=True)
+            self.assertTrue(cleaned_force)
+            self.assertFalse(os.path.exists(lock_path))
+            self.assertFalse(os.path.exists(sock_path))
 
     def test_command_update_status_and_note(self):
         phd_tracker.command_update("job2", status="interviewing", note="Got an interview!")
@@ -322,6 +309,32 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertIn("Failed to launch system Google Chrome", mock_stderr.getvalue())
         self.assertNotIn("Falling back to bundled chromium", mock_stderr.getvalue())
 
+    @patch('phd_tracker.time.sleep')
+    @patch('phd_tracker._clean_stale_singleton_locks')
+    @patch('phd_tracker.scrape_jobsacuk')
+    @patch('phd_tracker.scrape_findaphd')
+    @patch('phd_tracker.sync_playwright')
+    def test_command_scrape_retries_once_on_singleton_collision(
+        self, mock_playwright, mock_findaphd, mock_jobsacuk, mock_clean_locks, mock_sleep
+    ):
+        mock_p = MagicMock()
+        mock_playwright.return_value.__enter__.return_value = mock_p
+        mock_context = MagicMock()
+
+        mock_p.chromium.launch_persistent_context.side_effect = [
+            RuntimeError("BrowserType.launch_persistent_context: Opening in existing browser session."),
+            mock_context,
+        ]
+
+        phd_tracker.command_scrape()
+
+        self.assertEqual(mock_p.chromium.launch_persistent_context.call_count, 2)
+        mock_clean_locks.assert_any_call(phd_tracker.BROWSER_PROFILE_DIR, force=True)
+        mock_sleep.assert_called_once_with(1)
+        mock_findaphd.assert_called_once()
+        mock_jobsacuk.assert_called_once()
+        mock_context.close.assert_called_once()
+
     def test_wait_for_cloudflare_no_challenge(self):
         mock_page = MagicMock()
         mock_page.title.return_value = "Normal PhD Results Page"
@@ -450,6 +463,34 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertTrue(urgent_idx < later_idx < no_deadline_idx)
 
     @patch('sys.stdout', new_callable=io.StringIO)
+    def test_command_list_includes_institution_location_and_full_description(self, mock_stdout):
+        with phd_tracker.db_session() as conn:
+            phd_tracker.insert_job(
+                conn, "full_job", "Full Description Job", "http://full_job",
+                institution="Imperial College London", location="London",
+                deadline="2027-01-20", description="Detailed research into quantum algorithms.\nSecond line of description."
+            )
+
+        # 1. Summary mode (full=False)
+        phd_tracker.command_list(status="unreviewed", full=False)
+        out_summary = mock_stdout.getvalue()
+        self.assertIn("Institution: Imperial College London", out_summary)
+        self.assertIn("(London)", out_summary)
+        self.assertIn("Deadline: 2027-01-20", out_summary)
+        self.assertIn("Deadline: Unstated", out_summary)
+        self.assertNotIn("Detailed research into quantum algorithms.", out_summary)
+
+        # 2. Full mode (full=True)
+        mock_stdout.truncate(0)
+        mock_stdout.seek(0)
+        phd_tracker.command_list(status="unreviewed", full=True)
+        out_full = mock_stdout.getvalue()
+        self.assertIn("Institution: Imperial College London", out_full)
+        self.assertIn("(London)", out_full)
+        self.assertIn("Deadline: 2027-01-20", out_full)
+        self.assertIn("Description:\n    Detailed research into quantum algorithms.\n    Second line of description.", out_full)
+
+    @patch('sys.stdout', new_callable=io.StringIO)
     def test_command_show(self, mock_stdout):
         phd_tracker.command_show("job1")
         output = mock_stdout.getvalue()
@@ -510,7 +551,25 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertEqual(phd_tracker.parse_deadline("Closes: 10/02/2027"), "2027-02-10")
         self.assertIsNone(phd_tracker.parse_deadline("Contact the department for further details."))
 
-    def test_insert_job_auto_sanitises_and_extracts_deadline(self):
+    def test_parse_deadline_until_variants(self):
+        self.assertEqual(
+            phd_tracker.parse_deadline("This project is open for applications until 22nd January 2027"),
+            "2027-01-22"
+        )
+        self.assertEqual(
+            phd_tracker.parse_deadline("Applications until 15 March 2027"),
+            "2027-03-15"
+        )
+        self.assertEqual(
+            phd_tracker.parse_deadline("Applications until: 2027-01-22"),
+            "2027-01-22"
+        )
+        self.assertEqual(
+            phd_tracker.parse_deadline("This project is open until 10/02/2027"),
+            "2027-02-10"
+        )
+
+    def test_insert_job_auto_sanitises_and_parses_deadline(self):
         with phd_tracker.db_session() as conn:
             phd_tracker.insert_job(
                 conn,

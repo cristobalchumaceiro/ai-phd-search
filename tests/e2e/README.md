@@ -7,8 +7,8 @@ This directory contains a repeatable **New-User Onboarding Playbook** (`new_user
 ## What It Verifies
 
 1. **Zero-State Onboarding (`/setup`):** Generating a valid `user_profile.md` from scratch with a narrow, fast search query.
-2. **Cold-Start Anti-Bot Clearance (`/find`):** Launching `patchright` with an empty `.browser_profile` (zero cached cookies), clearing Cloudflare Turnstile automatically, paginating through all search pages, and navigating to individual PhD project URLs to extract full, sanitised descriptions.
-3. **Evaluation & Triage (`/match`):** Extracting `unreviewed` roles, evaluating them against the test persona's research criteria, applying evaluations (`pending` / `rejected`), and verifying that `tmp/` files are cleaned up.
+2. **Cold-Start Anti-Bot Clearance (`/find`):** Launching `patchright` with an empty `.browser_profile` (zero cached cookies), clearing Cloudflare Turnstile automatically, paginating through all search pages, and navigating to individual PhD project URLs to fetch full, sanitised descriptions.
+3. **Evaluation & Triage (`/match`):** Inspecting `unreviewed` roles via `list --status unreviewed --full`, evaluating them against the test persona's research criteria, and committing evaluations (`pending` / `rejected`) directly via `update`.
 4. **Pipeline Inspection (`/summary`, `/list`, `/show`):** Verifying status counts, deadline sorting (`--urgent`), and record formatting.
 
 ## How to Run
