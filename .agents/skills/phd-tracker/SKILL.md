@@ -98,9 +98,10 @@ Follow this exact 4-step deterministic sequence:
    - **Circuit Breaker:** If `0 found`, skip Step 3, run `./.venv/bin/python phd_tracker.py list --urgent` (`BypassSandbox: false`), and output the **When No New Positions Are Found** template below.
 3. **Step 3 (`update` & `supervisor` per unreviewed job):** Read `user_profile.md` once. For each unreviewed job output in Step 2, evaluate fit against `user_profile.md` and run:
    ```bash
-   ./.venv/bin/python phd_tracker.py update <job_id> --status <pending|manual_review|rejected> --reason "<rationale>" [--deadline YYYY-MM-DD] [--institution "<inst>"] [--location "<loc>"]
+   ./.venv/bin/python phd_tracker.py update <job_id> --status <pending|rejected> --reason "<rationale>" [--deadline YYYY-MM-DD] [--institution "<inst>"] [--location "<loc>"]
    ```
-   (include `--deadline`, `--institution`, or `--location` if stated in the description but missing from the header, and run `./.venv/bin/python phd_tracker.py supervisor <job_id> ...` if a supervisor is named in the advert).
+   - **Status Rule (`pending` vs `shortlisted`):** Assign `pending` to **all** machine-accepted matches (both strong and borderline fits, noting any caveats such as stipend rate or methodological balance in `--reason`). Never use `manual_review`, and never auto-assign `shortlisted` — `shortlisted` is reserved strictly for projects manually approved by the user.
+   - Include `--deadline` (standard ASCII `YYYY-MM-DD`), `--institution`, or `--location` if stated in the description but missing from the header, and run `./.venv/bin/python phd_tracker.py supervisor <job_id> ...` if a supervisor is named in the advert.
 4. **Step 4 (`list --urgent` & Digest):** Run `./.venv/bin/python phd_tracker.py list --urgent` (`BypassSandbox: false`) and render the **Standard Output Template** below.
 
 > [!CAUTION]
@@ -114,47 +115,49 @@ Follow this exact 4-step deterministic sequence:
 
 ### Standard Output Template (`/find` & `/match` Digest)
 
-Format `/match` and combined daily `/find` + `/match` responses using this structure:
+Format `/match` and combined daily `/find` + `/match` responses using this exact structure:
 
 #### 1. When New Positions Are Discovered & Evaluated:
 ```markdown
-### PhD Tracker Run: YYYY-MM-DD
+### PhD Tracker Run — YYYY‑MM‑DD
+> **Run Summary:** **X** scraped (A FindAPhD · B jobs.ac.uk) · **Y** new ingested · **M** matches · **R** rejected
 
-#### Run Metrics
-* **Total Scraped:** X listings across FindAPhD & jobs.ac.uk
-* **New Ingested:** Y new entries
-* **Evaluations Applied:** Z evaluated against user_profile.md
+#### Matches Found (M)
+| Project | Institution | Supervisor(s) | Fit Summary | Deadline |
+| :--- | :--- | :--- | :--- | :--- |
+| [<Job Title>](<URL>) | <Concise/Abbreviated Institution> | <Names or —> | <1 concise sentence on alignment + funding/caveats> | <YYYY‑MM‑DD or —> |
 
-#### Promoted Opportunities
-<!-- 4–6 lines per match (status: pending or manual_review) -->
-* **[<job_id>] [<Job Title>](<URL>)** — <Institution>
-  * **Supervisors:** <Names & Affiliated Centres/Labs>
-  * **Funding & Eligibility:** <Home/International status, stipend details>
-  * **Application Deadline:** <YYYY-MM-DD or Unstated>
-  * **Fit Assessment:** <1–2 sentences explaining alignment with user_profile.md>
-  * **Assigned Status:** `pending` | `manual_review`
+#### In Progress (N)
+| Project | Institution | Supervisor(s) | Status | Deadline |
+| :--- | :--- | :--- | :--- | :--- |
+| [<Job Title>](<URL>) | <Concise/Abbreviated Institution> | <Names or —> | <Pending\|Shortlisted\|Contacted\|Applied\|Interviewing\|Offer> | <YYYY‑MM‑DD or —> |
 
-#### Active Pipeline Overview
-<!-- 1 line per active (non-rejected) position -->
-* **[<job_id>]** [<Job Title>](<URL>) — <Supervisors> (<Institution>) | `<status>` | Deadline: <YYYY-MM-DD or Unstated>
+#### Rejected Today (R)
+* [<Job Title>](<URL>) — *<Short 1-clause rejection reason>.*
 ```
+*(If `M = 0` matches were promoted in the current run, render `#### Matches Found` followed by `*None today.*` instead of an empty table. If `R = 0` positions were rejected in the current run, omit the `#### Rejected Today` section entirely.)*
 
-#### 2. When No New Positions Are Found:
+#### 2. When No New Positions Are Found (`0` Newly Ingested):
 ```markdown
-### PhD Tracker Run: YYYY-MM-DD
+### PhD Tracker Run — YYYY‑MM‑DD
+> **Run Summary:** **X** scraped (A FindAPhD · B jobs.ac.uk) · **0** new ingested (all feeds up to date)
 
-#### Run Metrics
-* **Total Scraped:** X listings across FindAPhD & jobs.ac.uk
-* **New Ingested:** 0 (all current listings already in database)
-* **Status:** All feeds are up to date. No new unreviewed opportunities.
+#### Matches Found
+*None today.*
 
-#### Active Pipeline Overview
-* **[<job_id>]** [<Job Title>](<URL>) — <Supervisors> (<Institution>) | `<status>` | Deadline: <YYYY-MM-DD or Unstated>
+#### In Progress (N)
+| Project | Institution | Supervisor(s) | Status | Deadline |
+| :--- | :--- | :--- | :--- | :--- |
+| [<Job Title>](<URL>) | <Concise/Abbreviated Institution> | <Names or —> | <Pending\|Shortlisted\|Contacted\|Applied\|Interviewing\|Offer> | <YYYY‑MM‑DD or —> |
 ```
 
-**Output Formatting Rules:**
-* Keep each newly promoted opportunity to **4–6 lines** and each existing active pipeline item to **1 line**.
-* Do not repeat the full `user_profile.md` text, do not print raw JSON payloads, and do not list `rejected` positions unless explicitly asked by the user.
+**Strict Output Formatting Rules:**
+1. **No `ID` Column in Tables:** Do not include a `Job ID` column in `Matches Found` or `In Progress`; hyperlink the `Project` title directly to `<URL>`.
+2. **Single-Line `Status` & `Deadline` Cells (Prevent Overflow/Wrapping):**
+   * **Never wrap `Status` or `Deadline` in `` `backtick` `` code tags** inside tables. Render `Status` as plain single-word Title Case (`Pending`, `Shortlisted`, `Contacted`, `Applied`, `Interviewing`, `Offer`).
+   * **Always format rendered dates with Unicode non-breaking hyphens `‑` (`U+2011`)** instead of standard ASCII hyphens `-` (`U+002D`) — e.g. `2027‑01‑22` rather than `2027-01-22` — so browsers treat dates as single unbreakable tokens and never wrap `Deadline` onto two lines. *(Keep standard ASCII `YYYY-MM-DD` when passing `--deadline` to the CLI.)*
+3. **Dynamic Column Proportions:** Abbreviate well-known institutions in table cells (`UCL`, `KCL`, `QMUL`, `UWL`, `Imperial`, etc.), use `—` for unstated supervisors or deadlines, and keep `Fit Summary` to one concise sentence so `Project` receives maximum horizontal space.
+4. **Compact Rejections Footer:** Place `Rejected Today` **at the very bottom** after `In Progress` using single-line Markdown bullets (`* [<Job Title>](<URL>) — *<Short 1-clause reason>.*`). Do not use HTML `<details>` tags (to preserve CLI portability), do not include historical rejections from prior runs, and do not repeat `user_profile.md` or raw JSON payloads.
 
 ### 3. `/research <job_id>` — Project & Supervisor Research
 Trigger when the user requests deeper intelligence on a specific position or supervisor.
@@ -168,9 +171,9 @@ Trigger when the user requests deeper intelligence on a specific position or sup
 Trigger when the user wants a high-level status of their applications.
 1. Run `./.venv/bin/python phd_tracker.py summary` to get exact status counts.
 2. Run `./.venv/bin/python phd_tracker.py list --urgent` to list active positions sorted by closing date.
-3. Render a clean Markdown Kanban pipeline:
-   - **Shortlisted / Pending Review**
-   - **Contacted / Informal Discussions**
-   - **Applied (Awaiting Decision)**
-   - **Interviewing / Offers**
+3. Render the **`In Progress`** table (matching the 5-column formatting rules above) alongside status counts:
+   - **Pending** (machine-matched, awaiting human review)
+   - **Shortlisted** (human-approved)
+   - **Contacted** (informal supervisor discussions)
+   - **Applied / Interviewing / Offer**
 4. Highlight upcoming deadlines in the next 14–30 days.
