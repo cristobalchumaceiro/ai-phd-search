@@ -483,6 +483,20 @@ def parse_deadline(text):
         if month and 1 <= day <= 31:
             return f"{year:04d}-{month:02d}-{day:02d}"
 
+    # Pattern 2c: Month DD, YYYY (e.g. FindAPhD badge "Closing Date: Friday, January 22, 2027")
+    m_mdy = re.search(
+        rf"{deadline_keywords}[ \t:]+(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day,?[ \t]+)?([A-Za-z]+)[ \t]+(\d{{1,2}})(?:st|nd|rd|th)?,?[ \t]+(202\d)",
+        text,
+        re.I
+    )
+    if m_mdy:
+        month_str = m_mdy.group(1).lower()
+        day = int(m_mdy.group(2))
+        year = int(m_mdy.group(3))
+        month = MONTHS_MAP.get(month_str)
+        if month and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+
     # Pattern 3: DD/MM/YYYY
     m_slash = re.search(rf"{deadline_keywords}[ \t:]+(\d{{1,2}})/(\d{{1,2}})/(202\d)", text, re.I)
     if m_slash:
@@ -494,15 +508,71 @@ def parse_deadline(text):
 
     return None
 
+def extract_findaphd_metadata(html_or_soup):
+    """Extracts structured header and key-info badges (institution, department,
+    supervisors, closing date, funding) from FindAPhD project pages.
+    """
+    soup = html_or_soup if hasattr(html_or_soup, "select_one") else BeautifulSoup(html_or_soup or "", "html.parser")
+    inst_el = soup.select_one(".phd-header__institution")
+    dept_el = soup.select_one(".phd-header__department")
+    institution = inst_el.get_text(" ", strip=True) if inst_el else None
+    department = dept_el.get_text(" ", strip=True) if dept_el else None
+
+    supervisors = []
+    closing_text = None
+    funding = None
+    for span in soup.select(".key-info .key-info__content"):
+        text = re.sub(r"\s+", " ", span.get_text(" ", strip=True)).strip()
+        if not text:
+            continue
+        icon_classes = " ".join(" ".join(i.get("class", [])) for i in span.find_all("i")).lower()
+        if "fa-calendar" in icon_classes:
+            closing_text = text
+        elif any(k in icon_classes for k in ("fa-wallet", "fa-pound", "fa-sterling", "fa-coins", "fa-money")):
+            funding = text
+        elif not icon_classes or "fa-user" in icon_classes:
+            links = [a.get_text(" ", strip=True) for a in span.find_all("a") if a.get_text(" ", strip=True)]
+            candidates = links if links else [s.strip() for s in re.split(r"\s*,\s*", text) if s.strip()]
+            for cand in candidates:
+                low = cand.lower()
+                if any(bad in low for bad in ("funded", "project", "students", "year round", "deadline")):
+                    continue
+                if clean_supervisor_name(cand):
+                    supervisors.append(cand)
+
+    deadline = parse_deadline(f"Closing Date: {closing_text}") if closing_text else None
+    return {
+        "institution": institution or None,
+        "department": department or None,
+        "supervisors": supervisors,
+        "closing_text": closing_text,
+        "deadline": deadline,
+        "funding": funding,
+    }
+
 def sanitise_html_text(html_content):
     """Sanitises raw HTML by decomposing non-content tags (form, select, option,
     nav, footer, header, script, style, modals, cookies) and returning clean body text.
+    Preserves structured FindAPhD header/key-info fields placed outside .phd-sections__description.
     """
     if not html_content:
         return ""
     soup = BeautifulSoup(html_content, "html.parser")
     for tag in soup.select("form, select, option, nav, footer, header, script, style, noscript, .modal, [class*='modal'], [id*='modal'], [class*='cookie'], [id*='cookie']"):
         tag.decompose()
+
+    meta = extract_findaphd_metadata(soup)
+    header_lines = []
+    if meta["institution"]:
+        header_lines.append(f"Institution: {meta['institution']}")
+    if meta["department"]:
+        header_lines.append(f"Department: {meta['department']}")
+    if meta["supervisors"]:
+        header_lines.append(f"Supervisors: {', '.join(meta['supervisors'])}")
+    if meta["closing_text"]:
+        header_lines.append(f"Closing Date: {meta['closing_text']}")
+    if meta["funding"]:
+        header_lines.append(f"Funding: {meta['funding']}")
 
     desc_elem = soup.select_one(
         ".phd-sections__description, .phd-project-description, .project-description, "
@@ -518,6 +588,9 @@ def sanitise_html_text(html_content):
     cut_idx = cleaned_text.find("Register your interest for this PhD")
     if cut_idx != -1:
         cleaned_text = cleaned_text[:cut_idx].strip()
+    if header_lines:
+        header_block = "\n".join(header_lines)
+        return f"{header_block}\n\n{cleaned_text}" if cleaned_text else header_block
     return cleaned_text
 
 def clean_job_title(raw_title="", link_elem=None, card=None):
@@ -753,6 +826,27 @@ def scrape_findaphd(conn, browser_or_context):
         except Exception as e:
             print(f"[FindAPhD] Warning: Could not initialise curl_cffi session ({e}), falling back to browser.", file=sys.stderr)
 
+    def _apply_findaphd_detail(job_id, raw_html):
+        desc_text = sanitise_html_text(raw_html)
+        if not desc_text or is_cloudflare_blocked_text(desc_text):
+            return False
+        meta = extract_findaphd_metadata(raw_html)
+        fields = {"description": desc_text, "needs_full_description": False}
+        if meta["institution"]:
+            fields["institution"] = meta["institution"]
+        dl = meta["deadline"] or parse_deadline(desc_text)
+        if dl:
+            fields["deadline"] = dl
+        update_job(conn, job_id, **fields)
+        if meta["supervisors"]:
+            sup_entries = [
+                {"name": s, "institution": meta["institution"], "department": meta["department"]}
+                for s in meta["supervisors"]
+            ]
+            link_supervisors_for_job(conn, job_id, sup_entries, default_institution=meta["institution"])
+        conn.commit()
+        return True
+
     rows = conn.execute(
         "SELECT id, url, status, description, needs_full_description FROM jobs WHERE url LIKE '%findaphd%' ORDER BY rowid"
     ).fetchall()
@@ -773,15 +867,7 @@ def scrape_findaphd(conn, browser_or_context):
                 time.sleep(random.uniform(0.5, 1.5))
                 resp = curl_session.get(job_url, timeout=12)
                 if resp.status_code == 200 and not is_cloudflare_blocked_text(resp.text):
-                    desc_text = sanitise_html_text(resp.text)
-                    if desc_text and not is_cloudflare_blocked_text(desc_text):
-                        fields = {"description": desc_text, "needs_full_description": False}
-                        dl = parse_deadline(desc_text)
-                        if dl:
-                            fields["deadline"] = dl
-                        update_job(conn, job_id, **fields)
-                        conn.commit()
-                        description_extracted = True
+                    description_extracted = _apply_findaphd_detail(job_id, resp.text)
                 elif resp.status_code in (403, 503):
                     curl_session = None
             except Exception as e:
@@ -800,14 +886,7 @@ def scrape_findaphd(conn, browser_or_context):
                     pass
                 page_obj.evaluate("window.scrollBy(0, 500)")
                 time.sleep(0.5)
-                clean_desc = sanitise_html_text(page_obj.content())
-                if clean_desc and not is_cloudflare_blocked_text(clean_desc):
-                    fields = {"description": clean_desc, "needs_full_description": False}
-                    dl = parse_deadline(clean_desc)
-                    if dl:
-                        fields["deadline"] = dl
-                    update_job(conn, job_id, **fields)
-                    conn.commit()
+                _apply_findaphd_detail(job_id, page_obj.content())
             except Exception as e:
                 print(f"[FindAPhD] Failed to fetch {job_url}: {e}", file=sys.stderr)
 

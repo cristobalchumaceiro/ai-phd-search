@@ -533,6 +533,93 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertIn("10 fully funded 4-year interdisciplinary PhD positions.", clean)
         self.assertIn("Applications close 23 November 2026.", clean)
 
+    def test_extract_findaphd_header_metadata_and_sanitise(self):
+        findaphd_html = """
+        <html>
+            <body>
+                <div class="phd-header page-content">
+                    <h1 class="phd-header__phd-title">Assessing In-Orbit Servicing Adoption in Low Earth Orbit</h1>
+                    <span itemprop="provider">
+                        <h2>
+                            <a class="phd-header__institution" href="/phds/ucl">University College London</a>
+                            <a class="phd-header__department" href="/phds/mssl">Department of Space &amp; Climate Physics</a>
+                        </h2>
+                    </span>
+                </div>
+                <div class="key-info__outer">
+                    <div class="key-info">
+                        <span class="key-info__content">Dr Chekfoung Tan</span>
+                        <span class="key-info__content"><i class="fa-regular fa-calendar key-info__icon"></i>Friday, January 22, 2027</span>
+                        <span class="key-info__content"><i class="fa-regular fa-wallet key-info__icon"></i>Competition Funded PhD Project (Students Worldwide)</span>
+                    </div>
+                </div>
+                <div class="phd-sections phd-sections__description">
+                    <p>Low Earth Orbit (LEO) is now a commercially dominated regime.</p>
+                </div>
+            </body>
+        </html>
+        """
+        meta = phd_tracker.extract_findaphd_metadata(findaphd_html)
+        self.assertEqual(meta["institution"], "University College London")
+        self.assertEqual(meta["department"], "Department of Space & Climate Physics")
+        self.assertEqual(meta["supervisors"], ["Dr Chekfoung Tan"])
+        self.assertEqual(meta["deadline"], "2027-01-22")
+        self.assertEqual(meta["funding"], "Competition Funded PhD Project (Students Worldwide)")
+
+        clean = phd_tracker.sanitise_html_text(findaphd_html)
+        self.assertIn("Institution: University College London", clean)
+        self.assertIn("Department: Department of Space & Climate Physics", clean)
+        self.assertIn("Supervisors: Dr Chekfoung Tan", clean)
+        self.assertIn("Funding: Competition Funded PhD Project (Students Worldwide)", clean)
+        self.assertIn("Low Earth Orbit (LEO) is now a commercially dominated regime.", clean)
+        self.assertEqual(phd_tracker.parse_deadline(clean), "2027-01-22")
+
+    @patch('phd_tracker.cffi_requests', None)
+    @patch('time.sleep')
+    @patch('phd_tracker.get_target_url')
+    def test_scrape_findaphd_links_header_supervisors_and_institution(self, mock_get_target_url, mock_sleep):
+        mock_get_target_url.return_value = "https://www.findaphd.com/search"
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_browser.new_context.return_value.new_page.return_value = mock_page
+        mock_page.title.return_value = "PhD Results"
+
+        search_html = '<html><body><a href="/phds/project/ios?p200813">In-Orbit Servicing</a></body></html>'
+        detail_html = """
+        <html><body>
+            <div class="phd-header">
+                <a class="phd-header__institution">University College London</a>
+                <a class="phd-header__department">Department of Space &amp; Climate Physics</a>
+            </div>
+            <div class="key-info">
+                <span class="key-info__content">Dr Chekfoung Tan</span>
+                <span class="key-info__content"><i class="fa-regular fa-calendar"></i>Friday, January 22, 2027</span>
+            </div>
+            <div class="phd-sections__description"><p>Detailed space sustainability research.</p></div>
+        </body></html>
+        """
+        state = {"url": ""}
+        mock_page.goto.side_effect = lambda url, *a, **kw: state.update({"url": url})
+        def fake_content():
+            if "p200813" in state["url"]:
+                return detail_html
+            if "PG=2" in state["url"]:
+                return "<html><body>No results</body></html>"
+            return search_html
+        mock_page.content.side_effect = fake_content
+
+        with phd_tracker.db_session() as conn:
+            phd_tracker.scrape_findaphd(conn, mock_browser)
+            sups = phd_tracker.get_job_supervisors(conn, "p200813")
+
+        job = self.job("p200813")
+        self.assertEqual(job["institution"], "University College London")
+        self.assertEqual(job["deadline"], "2027-01-22")
+        self.assertEqual(len(sups), 1)
+        self.assertEqual(sups[0]["name"], "Chekfoung Tan")
+        self.assertEqual(sups[0]["institution"], "University College London")
+        self.assertEqual(sups[0]["department"], "Department of Space & Climate Physics")
+
     def test_clean_job_title(self):
         raw = "More details BHF 4-yr PhD Programme: Next Generation Human Models of Cardiovascular Disease Read more Funded PhD Programme"
         cleaned = phd_tracker.clean_job_title(raw)

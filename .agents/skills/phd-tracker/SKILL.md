@@ -158,6 +158,9 @@ Format `/match` and combined daily `/find` + `/match` responses using this exact
    * **Always format rendered dates with Unicode non-breaking hyphens `‑` (`U+2011`)** instead of standard ASCII hyphens `-` (`U+002D`) — e.g. `2027‑01‑22` rather than `2027-01-22` — so browsers treat dates as single unbreakable tokens and never wrap `Deadline` onto two lines. *(Keep standard ASCII `YYYY-MM-DD` when passing `--deadline` to the CLI.)*
 3. **Dynamic Column Proportions:** Abbreviate well-known institutions in table cells (`UCL`, `KCL`, `QMUL`, `UWL`, `Imperial`, etc.), use `—` for unstated supervisors or deadlines, and keep `Fit Summary` to one concise sentence so `Project` receives maximum horizontal space.
 4. **Compact Rejections Footer:** Place `Rejected Today` **at the very bottom** after `In Progress` using single-line Markdown bullets (`* [<Job Title>](<URL>) — *<Short 1-clause reason>.*`). Do not use HTML `<details>` tags (to preserve CLI portability), do not include historical rejections from prior runs, and do not repeat `user_profile.md` or raw JSON payloads.
+5. **Conditional Research Prompt (`Pending` Jobs Only):** Keep `phd-researcher` strictly user-triggered (do not auto-run it during `/find` or `/match`). At the very end of the digest:
+   * **If ≥ 1 job in `In Progress` currently has status `Pending`:** Append a single concise line offering to run `phd-researcher` on any `Pending` project or supervisory team to help triage it into `shortlisted` or `rejected` (e.g. *Need deeper insight to triage your `Pending` projects? Ask to research any project or supervisory team.*).
+   * **If 0 jobs have status `Pending`:** Omit this prompt completely so the output never nags when nothing is awaiting triage.
 
 ### 3. `/research <job_id>` — Project & Supervisor Research
 Trigger when the user requests deeper intelligence on a specific position or supervisor.
