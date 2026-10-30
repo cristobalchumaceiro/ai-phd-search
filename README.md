@@ -130,3 +130,13 @@ While users typically interact through the **Chat Commands** above, the local Py
 # 11. Delete a job (cascades to timeline and links)
 ./.venv/bin/python phd_tracker.py delete <job_id>
 ```
+
+---
+
+## Contributing
+
+Contributions of all kinds are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for local setup instructions and development guidelines.
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
