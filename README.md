@@ -113,7 +113,7 @@ While users typically interact through the **Chat Commands** above, the local Py
 ./.venv/bin/python phd_tracker.py show <job_id>
 
 # 6. Update status, deadline, title, research notes, institution, location, or timeline note
-./.venv/bin/python phd_tracker.py update <job_id> --status applied --note "Submitted online application"
+./.venv/bin/python phd_tracker.py update <job_id> [<job_id> ...] --status applied --note "Submitted online application"
 
 # 7. Add or enrich a supervisor profile and link to a job
 ./.venv/bin/python phd_tracker.py supervisor <job_id> --name "Prof Jane Doe" --title "Professor" --institution "UCL"

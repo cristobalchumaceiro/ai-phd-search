@@ -29,9 +29,9 @@ The application engine provides 10 specialised subcommands backed by SQLite (`jo
    ```bash
    ./.venv/bin/python phd_tracker.py scrape
    ```
-2. **`update`**: Updates an individual job's ATS status, deadline, title, research notes, institution, location, and/or appends a timestamped note to its audit timeline.
+2. **`update`**: Updates one or more jobs atomically in SQLite (`jobs.db`) with ATS status, deadline, title, evaluation reason, research notes, host institution, location, and/or appends a timestamped note to their audit timeline. Accepts multiple `<job_id>` arguments to update batches of jobs (e.g. multiple rejections sharing a rationale) in a single transaction. Valid statuses: `unreviewed`, `pending`, `shortlisted`, `contacted`, `applied`, `interviewing`, `offer`, `rejected`.
    ```bash
-   ./.venv/bin/python phd_tracker.py update <job_id> [--status <status>] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"] [--research-notes "<notes>"] [--institution "<institution>"] [--location "<location>"]
+   ./.venv/bin/python phd_tracker.py update <job_id> [<job_id> ...] [--status <status>] [--reason "<reason>"] [--note "<note>"] [--deadline <YYYY-MM-DD>] [--title "<title>"] [--research-notes "<notes>"] [--institution "<institution>"] [--location "<location>"]
    ```
 3. **`supervisor`**: Creates or enriches a supervisor's academic profile (deduplicated by name and institution with honorific stripping) and links them to a specific job. Pass `--list` (or `--search`) to view supervisors.
    ```bash
@@ -96,16 +96,22 @@ Follow this exact 4-step deterministic sequence:
 1. **Step 1 (`scrape`):** Run `./.venv/bin/python phd_tracker.py scrape` (`BypassSandbox: true`, `WaitMsBeforeAsync: 10000`). If backgrounded, end turn and wait for task completion notification.
 2. **Step 2 (`list --status unreviewed --full`):** Run `./.venv/bin/python phd_tracker.py list --status unreviewed --full` (`BypassSandbox: false`).
    - **Circuit Breaker:** If `0 found`, skip Step 3, run `./.venv/bin/python phd_tracker.py list --urgent` (`BypassSandbox: false`), and output the **When No New Positions Are Found** template below.
-3. **Step 3 (`update` & `supervisor` per unreviewed job):** Read `user_profile.md` once. For each unreviewed job output in Step 2, evaluate fit against `user_profile.md` and run:
-   ```bash
-   ./.venv/bin/python phd_tracker.py update <job_id> --status <pending|rejected> --reason "<rationale>" [--deadline YYYY-MM-DD] [--institution "<inst>"] [--location "<loc>"]
-   ```
-   - **Status Rule (`pending` vs `shortlisted`):** Assign `pending` to **all** machine-accepted matches (both strong and borderline fits, noting any caveats such as stipend rate or methodological balance in `--reason`). Never use `manual_review`, and never auto-assign `shortlisted` — `shortlisted` is reserved strictly for projects manually approved by the user.
+3. **Step 3 (`update` & `supervisor` per unreviewed job):** Read `user_profile.md` once. For unreviewed jobs output in Step 2, evaluate fit against `user_profile.md`:
+   - **Batching Rejections:** Batch multiple rejected positions that share a common rationale into a single command turn to minimise latency and token overhead:
+     ```bash
+     ./.venv/bin/python phd_tracker.py update <job_id1> <job_id2> ... --status rejected --reason "<shared rationale>"
+     ```
+   - **Promoting Matches (`pending`):** Update individual accepted matches with their specific rationale and metadata:
+     ```bash
+     ./.venv/bin/python phd_tracker.py update <job_id> --status pending --reason "<rationale>" [--deadline YYYY-MM-DD] [--institution "<inst>"] [--location "<loc>"]
+     ```
+   - **Status Rule (`pending` vs `shortlisted`):** The closed set of valid ATS statuses is `("unreviewed", "pending", "shortlisted", "contacted", "applied", "interviewing", "offer", "rejected")`. Assign `pending` to **all** machine-accepted matches (both strong and borderline fits, noting any caveats such as stipend rate or methodological balance in `--reason`). Never use `manual_review` (which is rejected by the engine), and never auto-assign `shortlisted` — `shortlisted` is reserved strictly for projects manually approved by the user.
    - Include `--deadline` (standard ASCII `YYYY-MM-DD`), `--institution`, or `--location` if stated in the description but missing from the header, and run `./.venv/bin/python phd_tracker.py supervisor <job_id> ...` if a supervisor is named in the advert.
 4. **Step 4 (`list --urgent` & Digest):** Run `./.venv/bin/python phd_tracker.py list --urgent` (`BypassSandbox: false`) and render the **Standard Output Template** below.
 
 > [!CAUTION]
 > **What NOT To Do During /find & /match:**
+> - Never execute an unprompted `phd_tracker.py list` or `phd_tracker.py summary` between Steps 2 and 4. All unreviewed job IDs and descriptions are already provided by Step 2 (`list --status unreviewed --full`); proceed directly to Step 3 updates and then Step 4 (`list --urgent`).
 > - Never execute `phd_tracker.py show <job_id>` for jobs already printed by `list --status unreviewed --full` or `list --urgent`. Step 2 provides full descriptions and Step 4 provides complete metadata (status, institution, location, deadline, supervisors, reason) for the pipeline summary.
 > - Never create temporary JSON files or workspace directories (`tmp/`, `.tmp/`).
 > - Never retry local database CLI commands with `BypassSandbox: true`.

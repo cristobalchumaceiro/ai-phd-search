@@ -181,6 +181,75 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertEqual(timeline[0]["note"], "Got an interview!")
         self.assertTrue(timeline[0]["timestamp"])
 
+    def test_validate_status(self):
+        self.assertEqual(phd_tracker.validate_status("pending"), "pending")
+        self.assertEqual(phd_tracker.validate_status("Pending"), "pending")
+        self.assertEqual(phd_tracker.validate_status("SHORTLISTED"), "shortlisted")
+        self.assertIsNone(phd_tracker.validate_status(None))
+
+        with patch('sys.stderr', new_callable=io.StringIO) as mock_stderr, self.assertRaises(SystemExit) as cm:
+            phd_tracker.validate_status("manual_review")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Error: Invalid status 'manual_review'.", mock_stderr.getvalue())
+        self.assertIn("Valid statuses: unreviewed, pending, shortlisted, contacted, applied, interviewing, offer, rejected.", mock_stderr.getvalue())
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_command_update_invalid_status(self, mock_stderr):
+        with self.assertRaises(SystemExit) as cm:
+            phd_tracker.command_update("job1", status="bad_status")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Error: Invalid status 'bad_status'.", mock_stderr.getvalue())
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_command_list_invalid_status(self, mock_stderr):
+        with self.assertRaises(SystemExit) as cm:
+            phd_tracker.command_list(status="bad_status")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Error: Invalid status 'bad_status'.", mock_stderr.getvalue())
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_command_update_batch_atomic_success(self, mock_stderr):
+        phd_tracker.command_update(["job1", "job2"], status="rejected", reason="Out of research scope")
+        job1 = self.job("job1")
+        job2 = self.job("job2")
+        self.assertEqual(job1["status"], "rejected")
+        self.assertEqual(job1["reason"], "Out of research scope")
+        self.assertEqual(job2["status"], "rejected")
+        self.assertEqual(job2["reason"], "Out of research scope")
+        self.assertIn("Successfully updated 2 jobs: job1, job2.", mock_stderr.getvalue())
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_command_update_batch_atomic_rollback_on_missing_id(self, mock_stderr):
+        initial_job1 = self.job("job1")
+        self.assertEqual(initial_job1["status"], "unreviewed")
+
+        with self.assertRaises(SystemExit) as cm:
+            phd_tracker.command_update(["job1", "missing_job_xyz"], status="rejected", reason="Out of scope")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Error: Job ID 'missing_job_xyz' not found.", mock_stderr.getvalue())
+
+        # job1 must remain untouched (atomic rollback)
+        job1_after = self.job("job1")
+        self.assertEqual(job1_after["status"], "unreviewed")
+        self.assertIsNone(job1_after["reason"])
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_command_update_batch_deduplicates_repeated_ids(self, mock_stderr):
+        phd_tracker.command_update(["job1", "job1"], status="pending", note="Evaluated once")
+        with phd_tracker.db_session() as conn:
+            timeline = phd_tracker.get_timeline(conn, "job1")
+        self.assertEqual(len(timeline), 1)
+        self.assertIn("Successfully updated job 'job1'.", mock_stderr.getvalue())
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_cli_main_update_multi_id(self, mock_stderr):
+        test_argv = ["phd_tracker.py", "update", "job1", "job2", "--status", "Pending"]
+        with patch.object(sys, 'argv', test_argv):
+            phd_tracker.main()
+        self.assertEqual(self.job("job1")["status"], "pending")
+        self.assertEqual(self.job("job2")["status"], "pending")
+        self.assertIn("Successfully updated 2 jobs: job1, job2.", mock_stderr.getvalue())
+
     @patch('sys.stderr', new_callable=io.StringIO)
     def test_command_update_invalid_job(self, mock_stderr):
         with self.assertRaises(SystemExit) as cm:
@@ -440,6 +509,33 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertIn("Total Jobs in Database: 2", output)
         self.assertIn("unreviewed", output)
         self.assertIn("applied", output)
+        self.assertNotIn("Last Scrape", output)
+
+    @patch('sys.stdout', new_callable=io.StringIO)
+    def test_command_summary_multi_source(self, mock_stdout):
+        with phd_tracker.db_session() as conn:
+            phd_tracker.log_scrape_run(conn, "findaphd", "http://findaphd", 3, 78, 5)
+            phd_tracker.log_scrape_run(conn, "jobsacuk", "http://jobsacuk", 1, 5, 1)
+        phd_tracker.command_summary()
+        output = mock_stdout.getvalue()
+        self.assertIn("findaphd", output)
+        self.assertIn("78 found, 5 new", output)
+        self.assertIn("jobsacuk", output)
+        self.assertIn("5 found, 1 new", output)
+
+    @patch('sys.stderr', new_callable=io.StringIO)
+    @patch('phd_tracker.scrape_jobsacuk')
+    @patch('phd_tracker.scrape_findaphd')
+    @patch('phd_tracker.sync_playwright')
+    def test_command_scrape_aggregated_telemetry(self, mock_playwright, mock_findaphd, mock_jobsacuk, mock_stderr):
+        mock_p = MagicMock()
+        mock_playwright.return_value.__enter__.return_value = mock_p
+        mock_context = mock_p.chromium.launch_persistent_context.return_value
+        mock_findaphd.return_value = (78, 5)
+        mock_jobsacuk.return_value = (5, 1)
+
+        phd_tracker.command_scrape()
+        self.assertIn("Scraping complete: 83 scraped (78 findaphd, 5 jobsacuk), 6 new ingested.", mock_stderr.getvalue())
 
     @patch('sys.stdout', new_callable=io.StringIO)
     def test_command_list(self, mock_stdout):
@@ -532,6 +628,93 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertNotIn("Copyright 2026", clean)
         self.assertIn("10 fully funded 4-year interdisciplinary PhD positions.", clean)
         self.assertIn("Applications close 23 November 2026.", clean)
+
+    def test_sanitise_html_text_unwraps_inline_tags_and_preserves_breaks(self):
+        html = """
+        <div class="phd-sections__description">
+            <p>Apply by 27<sup>th</sup> January 2027 to the <a href="https://qmul.ac.uk/deri"><strong>Digital Environment Research Institute</strong></a> (<span>DERI</span>).<br>Second line after explicit line break.</p>
+        </div>
+        """
+        clean = phd_tracker.sanitise_html_text(html)
+        self.assertIn("Apply by 27th January 2027 to the Digital Environment Research Institute (DERI).", clean)
+        self.assertIn("Second line after explicit line break.", clean)
+        self.assertNotIn("27\n\nth", clean)
+        self.assertNotIn("th\n\nJanuary", clean)
+
+    def test_sanitise_html_text_strips_findaphd_program_boilerplate(self):
+        html = """
+        <html>
+            <body>
+                <div class="page-wrapper">
+                    <div class="top-notice">FREE PhD Study Fair - London 2026 | REGISTER NOW</div>
+                    <nav class="breadcrumb"><a href="/">Home</a> > <a href="/phds">PhDs</a></nav>
+                    <div class="phd-programme-description">
+                        <h2>President’s PhD Scholarships at Imperial College London</h2>
+                        <p>Outstanding applicants are invited to apply for a PhD scholarship.</p>
+                        <h3>All PhD Opportunities Pages</h3>
+                        <ul>
+                            <li><a href="/phds/agriculture">Agriculture (1)</a></li>
+                            <li><a href="/phds/biology">Biological Sciences (24)</a></li>
+                            <li><a href="/phds/vet">Veterinary Sciences (35)</a></li>
+                        </ul>
+                        <p>Further details on eligibility and awards.</p>
+                        <div class="cta-buttons">
+                            <a href="https://example.com/apply">Apply Online</a>
+                            <a href="https://example.com/website">Visit website</a>
+                        </div>
+                    </div>
+                </div>
+            </body>
+        </html>
+        """
+        clean = phd_tracker.sanitise_html_text(html)
+        self.assertNotIn("FREE PhD Study Fair", clean)
+        self.assertNotIn("All PhD Opportunities Pages", clean)
+        self.assertNotIn("Agriculture (1)", clean)
+        self.assertNotIn("Veterinary Sciences (35)", clean)
+        self.assertNotIn("Apply Online", clean)
+        self.assertNotIn("Visit website", clean)
+        self.assertIn("President’s PhD Scholarships at Imperial College London", clean)
+        self.assertIn("Outstanding applicants are invited to apply for a PhD scholarship.", clean)
+        self.assertIn("Further details on eligibility and awards.", clean)
+
+    def test_extract_findaphd_metadata_program_fallback(self):
+        # 1. Fallback via h1 "at <Institution>" pattern (including curly apostrophe)
+        h1_html = """
+        <html><body>
+            <div class="phd-programme-description">
+                <h1>President’s PhD Scholarships at King’s College London</h1>
+                <p>Programme description content.</p>
+            </div>
+        </body></html>
+        """
+        meta1 = phd_tracker.extract_findaphd_metadata(h1_html)
+        self.assertEqual(meta1["institution"], "King’s College London")
+
+        # 2. Fallback via programme institution selectors
+        sel_html = """
+        <html><body>
+            <div class="instProgDesc">
+                <span class="phd-programme__institution">Queen Mary University of London</span>
+                <h2>Doctoral Training Programme</h2>
+            </div>
+        </body></html>
+        """
+        meta2 = phd_tracker.extract_findaphd_metadata(sel_html)
+        self.assertEqual(meta2["institution"], "Queen Mary University of London")
+
+        # 3. Guard against false-positive non-institution headings ("at Scale", generic h3)
+        non_inst_html = """
+        <html><body>
+            <div class="instProgDesc">
+                <h1>Machine Learning for Weather Forecasting at Scale</h1>
+                <h3>What the Scholarship Covers</h3>
+                <p>Full tuition and stipend.</p>
+            </div>
+        </body></html>
+        """
+        meta3 = phd_tracker.extract_findaphd_metadata(non_inst_html)
+        self.assertIsNone(meta3["institution"])
 
     def test_extract_findaphd_header_metadata_and_sanitise(self):
         findaphd_html = """
@@ -637,6 +820,68 @@ class TestPhDTrackerCLI(TrackerTestCase):
         self.assertEqual(phd_tracker.parse_deadline("Apply by: 2026-12-01"), "2026-12-01")
         self.assertEqual(phd_tracker.parse_deadline("Closes: 10/02/2027"), "2027-02-10")
         self.assertIsNone(phd_tracker.parse_deadline("Contact the department for further details."))
+
+    def test_findaphd_programme_end_to_end_sanitise_and_deadline(self):
+        program_html = """
+        <html>
+            <body>
+                <div class="promo-banner">FREE PhD Study Fair</div>
+                <div class="phd-programme-description">
+                    <h1>President’s PhD Scholarships at Imperial College London</h1>
+                    <p>Applicants who apply by 23:59 (UK time)<br><br>2 November 2026 will be considered for Round 1.</p>
+                    <div class="dept-sub-fac">
+                        <h3>All PhD Opportunities Pages</h3>
+                        <ul><li>Biological Sciences (10)</li></ul>
+                    </div>
+                    <a href="#">Apply Online</a>
+                </div>
+            </body>
+        </html>
+        """
+        meta = phd_tracker.extract_findaphd_metadata(program_html)
+        self.assertEqual(meta["institution"], "Imperial College London")
+
+        clean = phd_tracker.sanitise_html_text(program_html)
+        self.assertIn("Institution: Imperial College London", clean)
+        self.assertNotIn("FREE PhD Study Fair", clean)
+        self.assertNotIn("All PhD Opportunities Pages", clean)
+        self.assertNotIn("Apply Online", clean)
+
+        dl = phd_tracker.parse_deadline(clean)
+        self.assertEqual(dl, "2026-11-02")
+
+    def test_parse_deadline_hardened(self):
+        # 1. Time / timezone parenthetical and line break across multi-round text
+        multi_round = (
+            "Applicants who apply by 23:59 (UK time)\n\n2 November 2026 will be considered for Round 1. "
+            "Later applications may be considered by 11 January 2027 for Round 2."
+        )
+        self.assertEqual(phd_tracker.parse_deadline(multi_round), "2026-11-02")
+
+        # 2. Line breaks between deadline label and date
+        self.assertEqual(
+            phd_tracker.parse_deadline("Application Deadline:\n\n27th January 2027"),
+            "2027-01-27",
+        )
+
+        # 3. Weekday name prefix before DD Month YYYY
+        self.assertEqual(
+            phd_tracker.parse_deadline("Closing Date: Wednesday, 27 January 2027"),
+            "2027-01-27",
+        )
+
+        # 4. Split ordinal suffix ("27 th")
+        self.assertEqual(
+            phd_tracker.parse_deadline("Applications close by 27 th January 2027"),
+            "2027-01-27",
+        )
+
+        # 5. Bounded bridge: unrelated dates in subsequent paragraphs are not matched
+        unrelated = (
+            "The application deadline has not been set yet. The department was founded\n\n"
+            "on 12 May 2021 by a consortium of researchers."
+        )
+        self.assertIsNone(phd_tracker.parse_deadline(unrelated))
 
     def test_parse_deadline_until_variants(self):
         self.assertEqual(

@@ -116,6 +116,23 @@ JOB_COLUMNS = (
 )
 SUPERVISOR_COLUMNS = ("academic_title", "email", "department", "profile_url", "research_notes")
 
+VALID_STATUSES = (
+    "unreviewed", "pending", "shortlisted", "contacted",
+    "applied", "interviewing", "offer", "rejected",
+)
+
+def validate_status(status):
+    if status is None:
+        return None
+    norm = status.strip().lower()
+    if norm not in VALID_STATUSES:
+        print(
+            f"Error: Invalid status '{status}'. Valid statuses: {', '.join(VALID_STATUSES)}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return norm
+
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -138,7 +155,7 @@ def db_session(path=None):
     try:
         yield conn
         conn.commit()
-    except Exception:
+    except BaseException:
         conn.rollback()
         raise
     finally:
@@ -441,6 +458,60 @@ MONTHS_MAP = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
 }
 
+DEADLINE_KEYWORDS_RE = re.compile(
+    r"(?:deadline|closing date|closes|apply by|applications?\s+close|applications?\s+until|open\s+(?:for\s+applications\s+)?until)",
+    re.I,
+)
+
+DEADLINE_DATE_RE = re.compile(
+    r"(?:"
+    r"(?P<iso>\d{4}-\d{2}-\d{2})"
+    r"|"
+    r"(?P<day>\d{1,2})[ \t]*(?:st|nd|rd|th)?[ \t]+(?P<month>[A-Za-z]+)[ \t]+(?P<year>202\d)"
+    r"|"
+    r"(?P<month_mdy>[A-Za-z]+)[ \t]+(?P<day_mdy>\d{1,2})[ \t]*(?:st|nd|rd|th)?,?[ \t]+(?P<year_mdy>202\d)"
+    r"|"
+    r"(?P<day_sl>\d{1,2})/(?P<month_sl>\d{1,2})/(?P<year_sl>202\d)"
+    r")",
+    re.I,
+)
+
+DEADLINE_REV_RE = re.compile(
+    r"(\d{1,2})[ \t]*(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)[^.\n]{0,45}?(?:deadline|closing date|applications close|closes)",
+    re.I,
+)
+
+def _is_valid_deadline_bridge(bridge):
+    if len(bridge) > 45 or bridge.count("\n") > 2:
+        return False
+    if re.search(r"(?<!\b[ap]\.m)\.\s+[A-Z]", bridge, re.I) or bridge.strip().endswith("."):
+        return False
+    return True
+
+def _parse_date_match(m):
+    iso = m.group("iso")
+    if iso:
+        return iso
+    if m.group("day") and m.group("month") and m.group("year"):
+        day = int(m.group("day"))
+        month = MONTHS_MAP.get(m.group("month").lower())
+        year = int(m.group("year"))
+        if month and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+    if m.group("month_mdy") and m.group("day_mdy") and m.group("year_mdy"):
+        day = int(m.group("day_mdy"))
+        month = MONTHS_MAP.get(m.group("month_mdy").lower())
+        year = int(m.group("year_mdy"))
+        if month and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+    if m.group("day_sl") and m.group("month_sl") and m.group("year_sl"):
+        day = int(m.group("day_sl"))
+        month = int(m.group("month_sl"))
+        year = int(m.group("year_sl"))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+    return None
+
 def parse_deadline(text):
     """Parses standard UK PhD application closing dates into ISO YYYY-MM-DD.
     Returns None if no unambiguous deadline date is detected.
@@ -448,75 +519,64 @@ def parse_deadline(text):
     if not text:
         return None
 
-    deadline_keywords = r"(?:deadline|closing date|closes|apply by|applications?\s+close|applications?\s+until|open\s+(?:for\s+applications\s+)?until)"
+    candidates = []
 
-    # Pattern 1: ISO YYYY-MM-DD following deadline keywords
-    m_iso = re.search(rf"{deadline_keywords}[ \t:]+(\d{{4}}-\d{{2}}-\d{{2}})", text, re.I)
-    if m_iso:
-        return m_iso.group(1)
+    # 1. Forward search: deadline keywords followed by bounded bridge and date
+    for m in DEADLINE_KEYWORDS_RE.finditer(text):
+        sub = text[m.end():m.end() + 100]
+        for m_date in DEADLINE_DATE_RE.finditer(sub):
+            bridge = sub[:m_date.start()]
+            if not _is_valid_deadline_bridge(bridge):
+                continue
+            iso = _parse_date_match(m_date)
+            if iso:
+                candidates.append(iso)
+                break
 
-    # Pattern 2: DD Month YYYY on the same line after deadline keywords
-    m_text = re.search(
-        rf"{deadline_keywords}[ \t:\w]*(?:on|by|at)?[ \t:]+(\d{{1,2}})(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)",
-        text,
-        re.I
-    )
-    if m_text:
-        day = int(m_text.group(1))
-        month_str = m_text.group(2).lower()
-        year = int(m_text.group(3))
-        month = MONTHS_MAP.get(month_str)
-        if month and 1 <= day <= 31:
-            return f"{year:04d}-{month:02d}-{day:02d}"
-
-    # Pattern 2b: Date first then "Online applications close" / "deadline" on the same line
-    m_rev = re.search(
-        r"(\d{1,2})(?:st|nd|rd|th)?[ \t]+([A-Za-z]+)[ \t]+(202\d)[^.\n]*?(?:deadline|closing date|applications close|closes)",
-        text,
-        re.I
-    )
+    # 2. Reverse pattern: Date first then deadline keyword on same line
+    m_rev = DEADLINE_REV_RE.search(text)
     if m_rev:
         day = int(m_rev.group(1))
-        month_str = m_rev.group(2).lower()
+        month = MONTHS_MAP.get(m_rev.group(2).lower())
         year = int(m_rev.group(3))
-        month = MONTHS_MAP.get(month_str)
         if month and 1 <= day <= 31:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+            candidates.append(f"{year:04d}-{month:02d}-{day:02d}")
 
-    # Pattern 2c: Month DD, YYYY (e.g. FindAPhD badge "Closing Date: Friday, January 22, 2027")
-    m_mdy = re.search(
-        rf"{deadline_keywords}[ \t:]+(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day,?[ \t]+)?([A-Za-z]+)[ \t]+(\d{{1,2}})(?:st|nd|rd|th)?,?[ \t]+(202\d)",
-        text,
-        re.I
-    )
-    if m_mdy:
-        month_str = m_mdy.group(1).lower()
-        day = int(m_mdy.group(2))
-        year = int(m_mdy.group(3))
-        month = MONTHS_MAP.get(month_str)
-        if month and 1 <= day <= 31:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+    return min(candidates) if candidates else None
 
-    # Pattern 3: DD/MM/YYYY
-    m_slash = re.search(rf"{deadline_keywords}[ \t:]+(\d{{1,2}})/(\d{{1,2}})/(202\d)", text, re.I)
-    if m_slash:
-        day = int(m_slash.group(1))
-        month = int(m_slash.group(2))
-        year = int(m_slash.group(3))
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+INLINE_TAGS = (
+    "a", "strong", "b", "em", "i", "u", "span", "sup", "sub",
+    "small", "mark", "abbr", "code", "font",
+)
 
-    return None
+INSTITUTION_KEYWORD_RE = re.compile(
+    r"\b(?:University|College|Imperial|UCL|QMUL|KCL|LSE|Institute|School\s+of|Academy|Conservatoire)\b",
+    re.I,
+)
 
 def extract_findaphd_metadata(html_or_soup):
     """Extracts structured header and key-info badges (institution, department,
-    supervisors, closing date, funding) from FindAPhD project pages.
+    supervisors, closing date, funding) from FindAPhD project and programme pages.
     """
     soup = html_or_soup if hasattr(html_or_soup, "select_one") else BeautifulSoup(html_or_soup or "", "html.parser")
-    inst_el = soup.select_one(".phd-header__institution")
-    dept_el = soup.select_one(".phd-header__department")
+    inst_el = soup.select_one(
+        ".phd-header__institution, .phd-programme__institution, .programme-header__institution, "
+        ".phd-institution, .instProgDesc .inst-name"
+    )
+    dept_el = soup.select_one(".phd-header__department, .phd-programme__department, .programme-header__department")
     institution = inst_el.get_text(" ", strip=True) if inst_el else None
     department = dept_el.get_text(" ", strip=True) if dept_el else None
+
+    if not institution:
+        # Fallback to heading pattern: e.g. "President’s PhD Scholarships at Imperial College London"
+        h_el = soup.select_one("h1, .phd-header__phd-title, .phd-programme-description h1, .phd-programme-description h2")
+        if h_el:
+            h_text = h_el.get_text(" ", strip=True)
+            m_at = re.search(r"\bat\s+(?:the\s+)?([A-Z][A-Za-z0-9'’&.,\-\s]+?)(?:\s*\(.*?\))?$", h_text)
+            if m_at:
+                candidate = re.sub(r"\s+", " ", m_at.group(1)).strip(" .,;")
+                if candidate and INSTITUTION_KEYWORD_RE.search(candidate):
+                    institution = candidate
 
     supervisors = []
     closing_text = None
@@ -558,8 +618,20 @@ def sanitise_html_text(html_content):
     if not html_content:
         return ""
     soup = BeautifulSoup(html_content, "html.parser")
-    for tag in soup.select("form, select, option, nav, footer, header, script, style, noscript, .modal, [class*='modal'], [id*='modal'], [class*='cookie'], [id*='cookie']"):
+    for tag in soup.select(
+        "form, select, option, nav, footer, header, script, style, noscript, "
+        ".modal, [class*='modal'], [id*='modal'], [class*='cookie'], [id*='cookie'], "
+        ".breadcrumb, [class*='breadcrumb'], [class*='promo-banner'], [class*='study-fair'], "
+        "[class*='studyfair'], .phd-enquiry-form"
+    ):
         tag.decompose()
+
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        if "All PhD Opportunities Pages" in heading.get_text(" ", strip=True):
+            nxt = heading.find_next_sibling()
+            if nxt and nxt.name in ("ul", "ol"):
+                nxt.decompose()
+            heading.decompose()
 
     meta = extract_findaphd_metadata(soup)
     header_lines = []
@@ -582,8 +654,31 @@ def sanitise_html_text(html_content):
     if not desc_elem:
         desc_elem = soup.find("body") or soup
 
-    text = desc_elem.get_text("\n", strip=True)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for br in desc_elem.find_all("br"):
+        br.replace_with("\n")
+    for inline in desc_elem.find_all(INLINE_TAGS):
+        inline.unwrap()
+    desc_elem.smooth()
+
+    raw_lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in desc_elem.get_text("\n").splitlines()]
+    lines = []
+    in_subject_dir = False
+    for ln in raw_lines:
+        if not ln:
+            continue
+        if ln == "All PhD Opportunities Pages":
+            in_subject_dir = True
+            continue
+        if in_subject_dir:
+            if re.match(r"^[A-Za-z][A-Za-z ,&\-]+\(\d+\)$", ln):
+                continue
+            in_subject_dir = False
+        if re.search(r"^(?:FREE\s+)?PhD\s+Study\s+Fair\b|^\|\s*REGISTER\s+NOW\b", ln, re.I):
+            continue
+        if re.match(r"^(?:Apply Online|Visit website)$", ln, re.I):
+            continue
+        lines.append(ln)
+
     cleaned_text = "\n\n".join(lines)
     cut_idx = cleaned_text.find("Register your interest for this PhD")
     if cut_idx != -1:
@@ -729,7 +824,7 @@ def scrape_findaphd(conn, browser_or_context):
     base_url = get_target_url("FindAPhD_URL")
     if not base_url:
         print("Warning: FindAPhD_URL not found, skipping.", file=sys.stderr)
-        return
+        return (0, 0)
 
     owns_context = False
     if hasattr(browser_or_context, "new_context"):
@@ -893,12 +988,13 @@ def scrape_findaphd(conn, browser_or_context):
     page_obj.close()
     if owns_context:
         context.close()
+    return (len(seen_this_run), new_total)
 
 def scrape_jobsacuk(conn, browser_or_context):
     base_url = get_target_url("JobsAcUk_URL")
     if not base_url:
         print("Warning: JobsAcUk_URL not found, skipping.", file=sys.stderr)
-        return
+        return (0, 0)
 
     owns_context = False
     if hasattr(browser_or_context, "new_context"):
@@ -971,6 +1067,7 @@ def scrape_jobsacuk(conn, browser_or_context):
     page_obj.close()
     if owns_context:
         context.close()
+    return (len(seen_this_run), len(new_jobs))
 
 def _clean_stale_singleton_locks(profile_dir, force=False):
     """Removes stale Chrome SingletonLock/Socket/Cookie files in profile_dir.
@@ -1029,29 +1126,53 @@ def command_scrape():
                 print(f"[Scraper] Error: Failed to launch system Google Chrome: {chrome_err}", file=sys.stderr)
                 raise
 
-        scrape_findaphd(conn, browser_or_context)
-        scrape_jobsacuk(conn, browser_or_context)
+        res_find = scrape_findaphd(conn, browser_or_context)
+        res_jobs = scrape_jobsacuk(conn, browser_or_context)
         browser_or_context.close()
-    print("Scraping complete.", file=sys.stderr)
+
+    if (
+        isinstance(res_find, tuple) and len(res_find) == 2
+        and isinstance(res_jobs, tuple) and len(res_jobs) == 2
+    ):
+        found_f, new_f = res_find
+        found_j, new_j = res_jobs
+        total_found = found_f + found_j
+        total_new = new_f + new_j
+        print(
+            f"Scraping complete: {total_found} scraped ({found_f} findaphd, {found_j} jobsacuk), "
+            f"{total_new} new ingested.",
+            file=sys.stderr,
+        )
+    else:
+        print("Scraping complete.", file=sys.stderr)
 
 def _supervisor_label(sup):
     return sup["name"] + (f" ({sup['institution']})" if sup.get("institution") else "")
 
-def command_update(job_id, status=None, note=None, deadline=None, title=None,
+def command_update(job_ids, status=None, note=None, deadline=None, title=None,
                    reason=None, research_notes=None, institution=None, location=None):
+    raw_ids = [job_ids] if isinstance(job_ids, str) else list(job_ids)
+    job_id_list = list(dict.fromkeys(raw_ids))
+    if not job_id_list:
+        print("Error: Must provide at least one job ID to update.", file=sys.stderr)
+        sys.exit(1)
+
     if not any([status, note, deadline, title, reason, research_notes, institution, location]):
         print("Error: Must provide at least one of --status, --note, --deadline, --title, --reason, "
               "--research-notes, --institution, or --location to update.", file=sys.stderr)
         sys.exit(1)
 
+    norm_status = validate_status(status)
+
     with db_session() as conn:
-        if not job_exists(conn, job_id):
-            print(f"Error: Job ID '{job_id}' not found.", file=sys.stderr)
-            sys.exit(1)
+        for jid in job_id_list:
+            if not job_exists(conn, jid):
+                print(f"Error: Job ID '{jid}' not found.", file=sys.stderr)
+                sys.exit(1)
 
         fields = {}
-        if status:
-            fields["status"] = status
+        if norm_status:
+            fields["status"] = norm_status
         if title:
             fields["title"] = clean_job_title(title)
         if deadline:
@@ -1064,10 +1185,17 @@ def command_update(job_id, status=None, note=None, deadline=None, title=None,
             fields["institution"] = institution
         if location:
             fields["location"] = location
-        update_job(conn, job_id, **fields)
-        if note:
-            add_timeline(conn, job_id, note)
-    print(f"Successfully updated job '{job_id}'.", file=sys.stderr)
+
+        for jid in job_id_list:
+            update_job(conn, jid, **fields)
+            if note:
+                add_timeline(conn, jid, note)
+
+    if len(job_id_list) == 1:
+        print(f"Successfully updated job '{job_id_list[0]}'.", file=sys.stderr)
+    else:
+        ids_str = ", ".join(job_id_list)
+        print(f"Successfully updated {len(job_id_list)} jobs: {ids_str}.", file=sys.stderr)
 
 def command_supervisor(job_id=None, name=None, academic_title=None, email=None, institution=None,
                        department=None, profile_url=None, notes=None, list_mode=False, search=None):
@@ -1243,17 +1371,18 @@ def command_summary():
         counts = conn.execute(
             "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status ORDER BY n DESC, status"
         ).fetchall()
-        last_run = conn.execute(
-            "SELECT ran_at, source, total_found, new_jobs_added FROM scrape_runs ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        last_runs = conn.execute(
+            "SELECT ran_at, source, total_found, new_jobs_added FROM scrape_runs "
+            "WHERE id IN (SELECT MAX(id) FROM scrape_runs GROUP BY source) ORDER BY source"
+        ).fetchall()
         sup_count = conn.execute("SELECT COUNT(*) FROM supervisors").fetchone()[0]
 
     print(f"\n{'='*20} PhD Tracker Summary {'='*20}")
     print(f"Total Jobs in Database: {total}")
     print(f"Supervisor Profiles: {sup_count}")
-    if last_run:
-        print(f"Last Scrape: {last_run['ran_at'][:19]} ({last_run['source']}: "
-              f"{last_run['total_found']} found, {last_run['new_jobs_added']} new)")
+    for lr in last_runs:
+        print(f"Last Scrape ({lr['source']}): {lr['ran_at'][:19]} "
+              f"({lr['total_found']} found, {lr['new_jobs_added']} new)")
     print(f"{'-'*55}")
     for row in counts:
         print(f"  • {row['status']:<18} : {row['n']} jobs")
@@ -1263,9 +1392,10 @@ def command_list(status=None, urgent=False, supervisors=False, search=None, full
     if supervisors:
         command_supervisors(search=search)
         return
+    norm_status = validate_status(status)
     with db_session() as conn:
-        if status:
-            where, params = "WHERE LOWER(status) = LOWER(?)", [status]
+        if norm_status:
+            where, params = "WHERE status = ?", [norm_status]
         else:
             where, params = "WHERE status != 'rejected'", []
         order = "ORDER BY deadline IS NULL, deadline ASC, rowid" if urgent else "ORDER BY rowid"
@@ -1279,7 +1409,7 @@ def command_list(status=None, urgent=False, supervisors=False, search=None, full
             matches.append((row, sups, latest))
 
     urgent_tag = " [Sorted by Nearest Deadline]" if urgent else ""
-    header = f"Jobs with Status '{status}'{urgent_tag}" if status else f"Active Tracked Jobs (Excluding Rejected){urgent_tag}"
+    header = f"Jobs with Status '{norm_status}'{urgent_tag}" if norm_status else f"Active Tracked Jobs (Excluding Rejected){urgent_tag}"
     print(f"\n=== {header} ({len(matches)} found) ===")
     if not matches:
         print("No matching jobs found.\n")
@@ -1370,7 +1500,7 @@ def main():
     subparsers.add_parser("scrape", help="Scrape new jobs and add to database")
 
     update_cmd = subparsers.add_parser("update", help="Update a job's fields and/or add a timeline note")
-    update_cmd.add_argument("job_id", help="The ID of the job to update")
+    update_cmd.add_argument("job_ids", nargs="+", metavar="job_id", help="One or more job IDs to update")
     update_cmd.add_argument("--status", help="New status for the job")
     update_cmd.add_argument("--note", help="Note to append to the job's timeline")
     update_cmd.add_argument("--deadline", help="Application deadline date (YYYY-MM-DD)")
@@ -1424,7 +1554,7 @@ def main():
     if args.command == "scrape":
         command_scrape()
     elif args.command == "update":
-        command_update(args.job_id, args.status, args.note, args.deadline, args.title,
+        command_update(args.job_ids, args.status, args.note, args.deadline, args.title,
                        args.reason, args.research_notes, args.institution, args.location)
     elif args.command == "supervisor":
         command_supervisor(args.job_id, args.name, args.academic_title, args.email, args.institution,
