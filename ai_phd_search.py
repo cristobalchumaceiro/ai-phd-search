@@ -19,7 +19,7 @@ except ImportError:
     cffi_requests = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("PHD_TRACKER_DATA_DIR") or SCRIPT_DIR
+DATA_DIR = os.environ.get("AI_PHD_SEARCH_DATA_DIR") or os.environ.get("PHD_TRACKER_DATA_DIR") or SCRIPT_DIR
 DB_FILENAME = "jobs.db"
 PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.md")
 DB_PATH = os.path.join(DATA_DIR, DB_FILENAME)
@@ -1377,7 +1377,7 @@ def command_summary():
         ).fetchall()
         sup_count = conn.execute("SELECT COUNT(*) FROM supervisors").fetchone()[0]
 
-    print(f"\n{'='*20} PhD Tracker Summary {'='*20}")
+    print(f"\n{'='*20} AI PhD Search Summary {'='*20}")
     print(f"Total Jobs in Database: {total}")
     print(f"Supervisor Profiles: {sup_count}")
     for lr in last_runs:
@@ -1493,7 +1493,7 @@ def command_show(job_id):
     print(f"{'='*70}\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="PhD Tracker CLI")
+    parser = argparse.ArgumentParser(description="AI PhD Search CLI")
     parser.add_argument("--data-dir", help="Directory for user_profile.md, jobs.db, and .browser_profile (useful for isolated E2E tests)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

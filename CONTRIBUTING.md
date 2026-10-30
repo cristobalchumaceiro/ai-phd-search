@@ -1,4 +1,4 @@
-# Contributing to PhD Tracker
+# Contributing to AI PhD Search
 
 Contributions, bug reports, and feature suggestions are welcome!
 
@@ -6,8 +6,8 @@ Contributions, bug reports, and feature suggestions are welcome!
 
 1. **Fork and clone** the repository:
    ```bash
-   git clone https://github.com/<your-username>/phd-tracker.git
-   cd phd-tracker
+   git clone https://github.com/<your-username>/ai-phd-search.git
+   cd ai-phd-search
    ```
 
 2. **Set up the virtual environment:**
@@ -25,8 +25,8 @@ Contributions, bug reports, and feature suggestions are welcome!
 ## Development Guidelines
 
 * **Privacy:** Never commit personal data. SQLite database files (`jobs.db`), personal profile files (`user_profile.md`), and documents in `docs/` are strictly git-ignored.
-* **Encapsulated Storage (Zero Raw SQL):** All database reads and writes must be handled via CLI subcommands in `phd_tracker.py` rather than ad-hoc SQL strings.
-* **Tests:** Add unit tests in `tests/test_phd_tracker.py` for any new parser logic or CLI commands. Ensure the full test suite passes before submitting.
+* **Encapsulated Storage (Zero Raw SQL):** All database reads and writes must be handled via CLI subcommands in `ai_phd_search.py` rather than ad-hoc SQL strings.
+* **Tests:** Add unit tests in `tests/test_ai_phd_search.py` for any new parser logic or CLI commands. Ensure the full test suite passes before submitting.
 * **Language:** Use British English spelling in documentation, code comments, and docstrings (e.g. *normalise*, *sanitise*, *colour*).
 
 ## Pull Requests

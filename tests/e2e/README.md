@@ -1,6 +1,6 @@
 # End-to-End (E2E) New-User Smoke Tests
 
-While `tests/test_phd_tracker.py` tests the CLI commands and HTML parsers offline using mocks (`./.venv/bin/python -m unittest discover -s tests`), external job boards (specifically FindAPhD's Cloudflare Turnstile configuration and DOM structure) change over time without notice.
+While `tests/test_ai_phd_search.py` tests the CLI commands and HTML parsers offline using mocks (`./.venv/bin/python -m unittest discover -s tests`), external job boards (specifically FindAPhD's Cloudflare Turnstile configuration and DOM structure) change over time without notice.
 
 This directory contains a repeatable **New-User Onboarding Playbook** (`new_user_playbook.md`) designed to be executed by an AI coding agent (or subagent) in an isolated test run directory (`--data-dir tests/e2e/run`).
 
@@ -17,4 +17,4 @@ Ask your agent (or invoke a subagent) with:
 
 > "Run the E2E new-user smoke test playbook in `tests/e2e/new_user_playbook.md`."
 
-Because the playbook passes `--data-dir tests/e2e/run` to every `phd_tracker.py` invocation, your real `user_profile.md`, `jobs.db`, and `.browser_profile` cookies in the repository root remain untouched.
+Because the playbook passes `--data-dir tests/e2e/run` to every `ai_phd_search.py` invocation, your real `user_profile.md`, `jobs.db`, and `.browser_profile` cookies in the repository root remain untouched.

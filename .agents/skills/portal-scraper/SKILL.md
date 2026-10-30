@@ -67,12 +67,12 @@ Verify the resulting dataset before committing it to the tracker:
 
 ---
 
-### Phase 5: Safe Ingestion & Hand-Off to PhD Tracker
+### Phase 5: Safe Ingestion & Hand-Off to AI PhD Search
 Once verified, save the extracted projects to `/tmp/portal_jobs.json` and run the atomic ingest command:
 ```bash
-./.venv/bin/python phd_tracker.py ingest /tmp/portal_jobs.json
+./.venv/bin/python ai_phd_search.py ingest /tmp/portal_jobs.json
 ```
 This safely merges the new opportunities into `jobs.db` with status `"unreviewed"` without risking database corruption.
 
-Finally, transition to the `phd-tracker` evaluation workflow:
-Tell the user the projects have been ingested, and proceed to evaluate the new `"unreviewed"` projects against their `user_profile.md` using `./.venv/bin/python phd_tracker.py list --status unreviewed --full` and `./.venv/bin/python phd_tracker.py update <job_id>`.
+Finally, transition to the `ai-phd-search` evaluation workflow:
+Tell the user the projects have been ingested, and proceed to evaluate the new `"unreviewed"` projects against their `user_profile.md` using `./.venv/bin/python ai_phd_search.py list --status unreviewed --full` and `./.venv/bin/python ai_phd_search.py update <job_id>`.

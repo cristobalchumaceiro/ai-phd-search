@@ -17,7 +17,7 @@ When the user requests research on a position (e.g. `/research <job_id>` or "res
 ### Step 1: Ingest Ground Truth Record
 Retrieve the project record directly from the local database:
 ```bash
-./.venv/bin/python phd_tracker.py show <job_id>
+./.venv/bin/python ai_phd_search.py show <job_id>
 ```
 Extract:
 - Official Project Title & Host Institution(s)
@@ -91,17 +91,17 @@ To ensure intelligence gathered during research is stored permanently in the dat
 1. **Enrich Supervisor Profiles & Links:**
    Store verified academic details, staff page URLs, and lab research notes:
    ```bash
-   ./.venv/bin/python phd_tracker.py supervisor <job_id> --name "<Supervisor Name>" [--title "<Academic Title>"] [--institution "<Institution>"] [--department "<Department>"] [--email "<Email>"] [--url "<Profile URL>"] [--notes "<Lab Group & Publications>"]
+   ./.venv/bin/python ai_phd_search.py supervisor <job_id> --name "<Supervisor Name>" [--title "<Academic Title>"] [--institution "<Institution>"] [--department "<Department>"] [--email "<Email>"] [--url "<Profile URL>"] [--notes "<Lab Group & Publications>"]
    ```
 
 2. **Save Project Research Notes & Append Timeline:**
    Update project research notes and record an audit log in a single command:
    ```bash
-   ./.venv/bin/python phd_tracker.py update <job_id> --research-notes "<Concise summary of decoded problem, methodology, and omissions>" --note "Completed academic intelligence dossier on supervisors and project literature"
+   ./.venv/bin/python ai_phd_search.py update <job_id> --research-notes "<Concise summary of decoded problem, methodology, and omissions>" --note "Completed academic intelligence dossier on supervisors and project literature"
    ```
 
 3. **Query Existing Supervisor Dossiers:**
    Cross-reference supervisors across different PhD vacancies:
    ```bash
-   ./.venv/bin/python phd_tracker.py supervisors [--search "<Supervisor or University>"]
+   ./.venv/bin/python ai_phd_search.py supervisors [--search "<Supervisor or University>"]
    ```

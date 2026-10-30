@@ -1,6 +1,6 @@
 # New-User Onboarding E2E Playbook
 
-This playbook simulates a brand-new user setting up `phd-tracker` from scratch with fresh browser cookies. Run every command using `--data-dir tests/e2e/run` so the live workspace files (`user_profile.md`, `jobs.db`, and `.browser_profile`) are never modified.
+This playbook simulates a brand-new user setting up `ai-phd-search` from scratch with fresh browser cookies. Run every command using `--data-dir tests/e2e/run` so the live workspace files (`user_profile.md`, `jobs.db`, and `.browser_profile`) are never modified.
 
 ---
 
@@ -51,7 +51,7 @@ Write `tests/e2e/run/user_profile.md` with a specific FindAPhD search URL that r
 Execute the scraper against the isolated data directory (always run `scrape` with `BypassSandbox: true` on macOS so Seatbelt does not block Chrome's `MachPortRendezvousServer` and trigger a `SIGTRAP` crash popup):
 
 ```bash
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run scrape
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run scrape
 ```
 
 **Pass Criteria:**
@@ -73,22 +73,22 @@ Execute the scraper against the isolated data directory (always run `scrape` wit
 
 1. Inspect unreviewed roles with full descriptions directly on stdout:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --status unreviewed --full
+   ./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run list --status unreviewed --full
    ```
 2. Read `tests/e2e/run/user_profile.md` and evaluate each listed role against research preferences and funding criteria.
 3. Apply decisions and enrich metadata directly in the database for each role:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run update <job_id> --status <pending|rejected> --reason "<fit rationale>" [--institution "<institution>"] [--location "<location>"]
+   ./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run update <job_id> --status <pending|rejected> --reason "<fit rationale>" [--institution "<institution>"] [--location "<location>"]
    ```
 4. If supervisors are named in the project description, link their profiles:
    ```bash
-   ./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run supervisor <job_id> --name "<name>" [--institution "<institution>"] [--title "<title>"]
+   ./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run supervisor <job_id> --name "<name>" [--institution "<institution>"] [--title "<title>"]
    ```
 
 **Pass Criteria:**
-- Each unreviewed position is evaluated and updated via `phd_tracker.py update`.
-- Named supervisors are linked via `phd_tracker.py supervisor` and deduplicated into relational supervisor profiles.
-- Zero jobs remain in `unreviewed` status (`./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --status unreviewed` outputs `0 found`).
+- Each unreviewed position is evaluated and updated via `ai_phd_search.py update`.
+- Named supervisors are linked via `ai_phd_search.py supervisor` and deduplicated into relational supervisor profiles.
+- Zero jobs remain in `unreviewed` status (`./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run list --status unreviewed` outputs `0 found`).
 
 ---
 
@@ -97,17 +97,17 @@ Execute the scraper against the isolated data directory (always run `scrape` wit
 Run the core ATS inspection and update commands to verify end-to-end state transitions:
 
 ```bash
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run summary
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --urgent
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run supervisors
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run summary
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run list --urgent
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run supervisors
 ```
 
 Pick one `job_id` from the list and test `show` and `update`:
 
 ```bash
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run show <job_id>
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run update <job_id> --status shortlisted --deadline "2026-12-15" --note "E2E smoke test verification"
-./.venv/bin/python phd_tracker.py --data-dir tests/e2e/run list --status shortlisted --urgent
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run show <job_id>
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run update <job_id> --status shortlisted --deadline "2026-12-15" --note "E2E smoke test verification"
+./.venv/bin/python ai_phd_search.py --data-dir tests/e2e/run list --status shortlisted --urgent
 ```
 
 **Pass Criteria:**
