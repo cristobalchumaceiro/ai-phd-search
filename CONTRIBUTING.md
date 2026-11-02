@@ -27,7 +27,6 @@ Contributions, bug reports, and feature suggestions are welcome!
 * **Privacy:** Never commit personal data. SQLite database files (`jobs.db`), personal profile files (`user_profile.md`), and documents in `docs/` are strictly git-ignored.
 * **Encapsulated Storage (Zero Raw SQL):** All database reads and writes must be handled via CLI subcommands in `ai_phd_search.py` rather than ad-hoc SQL strings.
 * **Tests:** Add unit tests in `tests/test_ai_phd_search.py` for any new parser logic or CLI commands. Ensure the full test suite passes before submitting.
-* **Language:** Use British English spelling in documentation, code comments, and docstrings (e.g. *normalise*, *sanitise*, *colour*).
 
 ## Pull Requests
 
