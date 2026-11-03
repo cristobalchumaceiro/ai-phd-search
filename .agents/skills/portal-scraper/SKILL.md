@@ -8,7 +8,7 @@ description: >-
 
 # Autonomous Portal Scraper Runbook
 
-Use this skill when the user provides an arbitrary university, research centre, or Doctoral Landscape Award (DLA/CDT) portal URL (such as NERC TREES DLA, London NERC DTP, Imperial DLA, Cambridge, Oxford, etc.) and asks you to scrape or import its opportunities.
+Use this skill when the user provides an arbitrary university, research centre, or Doctoral Landscape Award (DLA/CDT/DTP) portal URL (such as UKRI CDTs/DLAs, Oxford, Cambridge, Imperial, ETH Zurich, etc.) and asks you to scrape or import its opportunities.
 
 ---
 

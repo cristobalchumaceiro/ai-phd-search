@@ -162,6 +162,10 @@ While users typically interact through the **Chat Commands** above, the local Py
 
 ---
 
+## Security & Privacy
+
+Because this is an agentic workflow that runs terminal commands, scrapes external web pages, and reads your local academic profile (`docs/`, `user_profile.md`, `jobs.db`), please review [SECURITY.md](SECURITY.md) for details on data handling and agentic risk boundaries.
+
 ## Contributing
 
 Contributions of all kinds are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for local setup instructions and development guidelines.

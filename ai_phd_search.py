@@ -19,7 +19,7 @@ except ImportError:
     cffi_requests = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("AI_PHD_SEARCH_DATA_DIR") or os.environ.get("PHD_TRACKER_DATA_DIR") or SCRIPT_DIR
+DATA_DIR = os.environ.get("AI_PHD_SEARCH_DATA_DIR") or SCRIPT_DIR
 DB_FILENAME = "jobs.db"
 PROFILE_PATH = os.path.join(DATA_DIR, "user_profile.md")
 DB_PATH = os.path.join(DATA_DIR, DB_FILENAME)
@@ -550,7 +550,7 @@ INLINE_TAGS = (
 )
 
 INSTITUTION_KEYWORD_RE = re.compile(
-    r"\b(?:University|College|Imperial|UCL|QMUL|KCL|LSE|Institute|School\s+of|Academy|Conservatoire)\b",
+    r"\b(?:University|College|Institute|School\s+of|Faculty\s+of|Academy|Conservatoire|Polytechnic|Centre|Center)\b",
     re.I,
 )
 

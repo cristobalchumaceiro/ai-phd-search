@@ -4,9 +4,6 @@ __pycache__/
 *.pyc
 
 # Local database (keeps your processed jobs private/local)
-jobs_database.json
-jobs_database*.json
-*.backup.json
 jobs.db
 jobs.db-journal
 jobs.db-wal
@@ -24,7 +21,6 @@ user_profile.md
 tmp/
 .tmp/
 tests/e2e/run/
-generate_report.py
 
 # Browser profile cache
 .browser_profile/
